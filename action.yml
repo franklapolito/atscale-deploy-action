@@ -48,11 +48,8 @@ runs:
           VM="vm-atscale-${{ inputs.client_id }}"
           DNS="atscale-${{ inputs.client_id }}"
           
-          echo "Creating Resource Group: $RG"
+          # 1. Create Resources
           az group create --name $RG --location ${{ inputs.region }} --tags Lifecycle=POC
-
-          echo "Creating VM..."
-          # Standard_DC2ds_v3 selected for Free Trial Quota compatibility
           az vm create \
             --resource-group $RG \
             --name $VM \
@@ -65,32 +62,26 @@ runs:
             --tags Lifecycle=POC Schedule=BusinessHours \
             --os-disk-size-gb 256
 
-          # Open Ports
           az vm open-port -g $RG -n $VM --port 22,80,443,16443,15432,11111 --priority 1010
 
-          # Static IP Lock Logic (The "Hybrid" Fix)
+          # 2. Lock Static IP
           PRIVATE_IP=$(az vm show -d -g $RG -n $VM --query privateIps -o tsv)
           NIC_ID=$(az vm show -g $RG -n $VM --query "networkProfile.networkInterfaces[0].id" -o tsv)
           NIC_NAME=$(basename $NIC_ID)
           IP_CONFIG_NAME=$(az network nic show --ids $NIC_ID --query "ipConfigurations[0].name" -o tsv)
           
-          if [ -z "$PRIVATE_IP" ] || [ -z "$IP_CONFIG_NAME" ]; then
-            echo "Error: Missing IP or Config Name. Skipping static lock."
-          else
-            az network nic ip-config update \
+          az network nic ip-config update \
               --resource-group $RG \
               --nic-name $NIC_NAME \
               --name $IP_CONFIG_NAME \
               --set privateIPAllocationMethod=Static \
               --private-ip-address $PRIVATE_IP
-            echo "Private IP $PRIVATE_IP is now Static."
-          fi
 
-          # Outputs for next steps
-          FQDN=$(az network public-ip list -g $RG --query "[0].dnsSettings.fqdn" -o tsv)
+          # 3. Calculate FQDN HERE (Where 'az' CLI exists)
+          FQDN=$(az vm show -d -g $RG -n $VM --query fqdns -o tsv)
           IP=$(az vm show -d -g $RG -n $VM --query publicIps -o tsv)
           
-          # Write to GITHUB_OUTPUT for composite usage
+          # 4. Save to Outputs
           echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
           echo "public_ip=$IP" >> $GITHUB_OUTPUT
 
@@ -106,50 +97,45 @@ runs:
         key: ${{ inputs.ssh_private_key }}
         timeout: 20m
         script: |
-          # 0. Setup Path
+          # === THE FIX ===
+          # We Inject the FQDN from the GitHub Runner directly into the script string.
+          # The VM just sees the final value, it doesn't need to run 'az' commands.
+          FQDN="${{ steps.infra.outputs.fqdn }}"
+          
+          echo "Configuring AtScale for: $FQDN"
+          
+          # Standard Setup
           export PATH=$PATH:/snap/bin
-
-          # 1. Install Tools
           sudo snap install microk8s --classic
           sudo snap install helm --classic
           sudo snap install kubectl --classic
-          
-          # 2. Fix Swap
           sudo swapoff -a
           sudo sed -i '/swap/d' /etc/fstab
 
-          # 3. Setup MicroK8s & MetalLB
           PRIVATE_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
           sudo microk8s status --wait-ready
           sudo microk8s enable hostpath-storage dns ingress
           sudo microk8s enable metallb:$PRIVATE_IP/32
 
-          # 4. Generate Certs (Self-Contained)
-          FQDN="${{ steps.infra.outputs.fqdn }}"
-          echo "Generating certs for $FQDN"
-          
+          # Certs
           openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
             -keyout tls.key -out tls.crt \
             -subj "/C=US/ST=MA/L=Boston/O=AtScale/CN=$FQDN"
             
-          # 5. Kube Config
           mkdir -p /home/atscale/.kube
           sudo microk8s config > /home/atscale/.kube/config
           sudo chown -R atscale:atscale /home/atscale/.kube
           chmod 600 /home/atscale/.kube/config
           
-          # Create Secret
           kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
 
-          # 6. Generate Default Values File
-          # (You can edit this block to match your standard production values)
+          # Values File (Uses the injected FQDN variable)
           cat <<EOF > values.yaml
           global:
             atscale:
               externalHostname: $FQDN
           EOF
 
-          # 7. Deploy AtScale
           helm upgrade --install atscale oci://registry-1.docker.io/atscaleinc/atscale \
             --version 2025.10.0 \
             -n atscale --create-namespace \
@@ -157,7 +143,7 @@ runs:
             --values ./values.yaml \
             --wait --timeout 15m
 
-          # 8. Configure Ingress (The Fix)
+          # Ingress Configuration
           cat <<EOF > ingress.yaml
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -191,7 +177,6 @@ runs:
           
           sudo microk8s kubectl apply -f ingress.yaml
 
-          # 9. Print Credentials
           echo "=============================================="
           AS_USER=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdmin}" | base64 -d)
           AS_PASS=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdminPassword}" | base64 -d)
