@@ -97,22 +97,16 @@ runs:
         key: ${{ inputs.ssh_private_key }}
         timeout: 20m
         script: |
-          # === THE FIX: Write to File First ===
-          # This forces GitHub to replace the variable string BEFORE sending the script
+          # 1. Variable Handoff
           echo "${{ steps.infra.outputs.fqdn }}" > hostname
-          
-          # Now we read it into a shell variable. Bulletproof.
           FQDN=$(cat hostname)
-          
-          # Fallback check
           if [ -z "$FQDN" ]; then
-             echo "WARNING: FQDN empty. Using IP."
              FQDN="${{ steps.infra.outputs.public_ip }}"
           fi
           
           echo "Configuring AtScale for: $FQDN"
           
-          # Standard Setup
+          # 2. Install Tools
           export PATH=$PATH:/snap/bin
           sudo snap install microk8s --classic
           sudo snap install helm --classic
@@ -120,12 +114,13 @@ runs:
           sudo swapoff -a
           sudo sed -i '/swap/d' /etc/fstab
 
+          # 3. Network Setup
           PRIVATE_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
           sudo microk8s status --wait-ready
           sudo microk8s enable hostpath-storage dns ingress
           sudo microk8s enable metallb:$PRIVATE_IP/32
 
-          # Certs
+          # 4. Certs (FIXED: Create Namespace FIRST)
           openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
             -keyout tls.key -out tls.crt \
             -subj "/C=US/ST=MA/L=Boston/O=AtScale/CN=$FQDN"
@@ -135,23 +130,20 @@ runs:
           sudo chown -R atscale:atscale /home/atscale/.kube
           chmod 600 /home/atscale/.kube/config
           
+          # Explicitly create namespace so the secret doesn't fail
+          kubectl create namespace atscale --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
 
-          # Values File (Now guaranteed to have the value from 'cat hostname')
-          cat <<EOF > values.yaml
-          global:
-            atscale:
-              externalHostname: $FQDN
-          EOF
-
+          # 5. Deploy AtScale (FIXED: Use --set instead of values.yaml)
+          # We pass the FQDN directly here. No more YAML indentation bugs.
           helm upgrade --install atscale oci://registry-1.docker.io/atscaleinc/atscale \
             --version 2025.10.0 \
-            -n atscale --create-namespace \
+            -n atscale \
             --kubeconfig /home/atscale/.kube/config \
-            --values ./values.yaml \
+            --set global.atscale.externalHostname=$FQDN \
             --wait --timeout 15m
 
-          # Ingress Configuration
+          # 6. Configure Ingress
           cat <<EOF > ingress.yaml
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -184,6 +176,15 @@ runs:
           EOF
           
           sudo microk8s kubectl apply -f ingress.yaml
+
+          # 7. Credentials
+          echo "=============================================="
+          AS_USER=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdmin}" | base64 -d)
+          AS_PASS=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdminPassword}" | base64 -d)
+          echo "AtScale URL: https://$FQDN"
+          echo "Username: $AS_USER"
+          echo "Password: $AS_PASS"
+          echo "=============================================="
 
           echo "=============================================="
           AS_USER=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdmin}" | base64 -d)
