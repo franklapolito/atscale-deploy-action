@@ -91,30 +91,26 @@ runs:
 
     - name: Configure Software
       uses: appleboy/ssh-action@master
-      env:
-        # MAP OUTPUTS TO ENVIRONMENT VARIABLES
-        PASSED_FQDN: ${{ steps.infra.outputs.fqdn }}
-        PASSED_IP: ${{ steps.infra.outputs.public_ip }}
       with:
         host: ${{ steps.infra.outputs.public_ip }}
         username: atscale
         key: ${{ inputs.ssh_private_key }}
         timeout: 20m
-        # PASS ENV VARS OVER SSH
-        envs: PASSED_FQDN,PASSED_IP
         script: |
-          # 0. Capture Variables
-          FQDN=$PASSED_FQDN
+          # === THE FIX: Write to File First ===
+          # This forces GitHub to replace the variable string BEFORE sending the script
+          echo "${{ steps.infra.outputs.fqdn }}" > hostname
           
-          # SAFETY CHECK: If FQDN is empty, fall back to IP to prevent localhost error
+          # Now we read it into a shell variable. Bulletproof.
+          FQDN=$(cat hostname)
+          
+          # Fallback check
           if [ -z "$FQDN" ]; then
-             echo "WARNING: FQDN variable was empty. Falling back to Public IP."
-             FQDN=$PASSED_IP
+             echo "WARNING: FQDN empty. Using IP."
+             FQDN="${{ steps.infra.outputs.public_ip }}"
           fi
           
-          echo "=========================================="
           echo "Configuring AtScale for: $FQDN"
-          echo "=========================================="
           
           # Standard Setup
           export PATH=$PATH:/snap/bin
@@ -141,7 +137,7 @@ runs:
           
           kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
 
-          # Values File (Uses the variable)
+          # Values File (Now guaranteed to have the value from 'cat hostname')
           cat <<EOF > values.yaml
           global:
             atscale:
