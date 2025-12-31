@@ -1,33 +1,13 @@
 name: 'Deploy AtScale POC'
 description: 'Provisions an Azure VM, installs MicroK8s, and deploys AtScale with HTTPS Ingress.'
-author: 'AtScale Engineering'
-branding:
-  icon: 'cloud'
-  color: 'blue'
-
 inputs:
-  client_id:
-    description: 'Client Name (e.g. acme). Lowercase, no spaces.'
-    required: true
-  region:
-    description: 'Azure Region'
-    required: false
-    default: 'eastus'
-  azure_client_id:
-    description: 'Azure Service Principal Client ID'
-    required: true
-  azure_tenant_id:
-    description: 'Azure Tenant ID'
-    required: true
-  azure_subscription_id:
-    description: 'Azure Subscription ID'
-    required: true
-  ssh_public_key:
-    description: 'SSH Public Key for VM access'
-    required: true
-  ssh_private_key:
-    description: 'SSH Private Key for remote execution'
-    required: true
+  client_id: { description: 'Client Name', required: true }
+  region: { description: 'Azure Region', required: false, default: 'eastus' }
+  azure_client_id: { description: 'Azure Client ID', required: true }
+  azure_tenant_id: { description: 'Azure Tenant ID', required: true }
+  azure_subscription_id: { description: 'Azure Subscription ID', required: true }
+  ssh_public_key: { description: 'SSH Public Key', required: true }
+  ssh_private_key: { description: 'SSH Private Key', required: true }
 
 runs:
   using: "composite"
@@ -64,17 +44,15 @@ runs:
 
           az vm open-port -g $RG -n $VM --port 22,80,443,16443,15432,11111 --priority 1010
 
-          # 2. Lock Static IP (With Safety Check Restored)
+          # 2. Lock Static IP (Safety Check Restored)
           PRIVATE_IP=$(az vm show -d -g $RG -n $VM --query privateIps -o tsv)
           NIC_ID=$(az vm show -g $RG -n $VM --query "networkProfile.networkInterfaces[0].id" -o tsv)
           NIC_NAME=$(basename $NIC_ID)
           IP_CONFIG_NAME=$(az network nic show --ids $NIC_ID --query "ipConfigurations[0].name" -o tsv)
           
-          # Safety Check: Prevent crash if Azure API returns empty values
           if [ -z "$PRIVATE_IP" ] || [ -z "$IP_CONFIG_NAME" ]; then
-             echo "Error: Could not detect IP or Config Name. Skipping Static Lock."
+             echo "Error: IP detection failed. Skipping Static Lock."
           else
-             echo "Locking Private IP: $PRIVATE_IP"
              az network nic ip-config update \
                 --resource-group $RG \
                 --nic-name $NIC_NAME \
@@ -84,19 +62,16 @@ runs:
           fi
 
           # 3. Calculate FQDN & IP
-          # FIX: Query Public IP resource directly. 'vm show' is unreliable/empty here.
+          # FIX 1: Use 'public-ip list' for reliable FQDN retrieval
           FQDN=$(az network public-ip list -g $RG --query "[0].dnsSettings.fqdn" -o tsv)
           IP=$(az vm show -d -g $RG -n $VM --query publicIps -o tsv)
           
-          echo "Detected FQDN: $FQDN"
-          
-          # 4. Save to Outputs
           echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
           echo "public_ip=$IP" >> $GITHUB_OUTPUT
 
     - name: Wait for Boot
       shell: bash
-      # Increased to 120s to allow NIC recovery after Static IP lock
+      # FIX 2: Increased sleep to 120s to ensure NIC is fully back up
       run: sleep 120
 
     - name: Configure Software
@@ -107,17 +82,14 @@ runs:
         key: ${{ inputs.ssh_private_key }}
         timeout: 20m
         script: |
-          # 1. Variable Handoff
+          # Variable Handoff
           echo "${{ steps.infra.outputs.fqdn }}" > hostname
           FQDN=$(cat hostname)
-          if [ -z "$FQDN" ]; then
-             echo "WARNING: FQDN empty. Fallback to IP used."
-             FQDN="${{ steps.infra.outputs.public_ip }}"
-          fi
+          if [ -z "$FQDN" ]; then FQDN="${{ steps.infra.outputs.public_ip }}"; fi
           
           echo "Configuring AtScale for: $FQDN"
           
-          # 2. Install Tools
+          # Install Tools
           export PATH=$PATH:/snap/bin
           sudo snap install microk8s --classic
           sudo snap install helm --classic
@@ -125,13 +97,13 @@ runs:
           sudo swapoff -a
           sudo sed -i '/swap/d' /etc/fstab
 
-          # 3. Network Setup
+          # Network Setup
           PRIVATE_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
           sudo microk8s status --wait-ready
           sudo microk8s enable hostpath-storage dns ingress
           sudo microk8s enable metallb:$PRIVATE_IP/32
 
-          # 4. Certs (FIXED: Create Namespace FIRST)
+          # Certs
           openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
             -keyout tls.key -out tls.crt \
             -subj "/C=US/ST=MA/L=Boston/O=AtScale/CN=$FQDN"
@@ -141,19 +113,20 @@ runs:
           sudo chown -R atscale:atscale /home/atscale/.kube
           chmod 600 /home/atscale/.kube/config
           
-          # Explicitly create namespace so the secret doesn't fail
+          # Create Namespace FIRST
           kubectl create namespace atscale --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
 
-          # 5. Deploy AtScale
+          # FIX 3: Use 'global.ingressDomain' so Keycloak knows its URL
           helm upgrade --install atscale oci://registry-1.docker.io/atscaleinc/atscale \
             --version 2025.10.0 \
             -n atscale \
             --kubeconfig /home/atscale/.kube/config \
+            --set global.ingressDomain=$FQDN \
             --set global.atscale.externalHostname=$FQDN \
             --wait --timeout 15m
 
-          # 6. Configure Ingress
+          # Configure Manual Ingress
           cat <<EOF > ingress.yaml
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -180,18 +153,18 @@ runs:
                   pathType: Prefix
                   backend:
                     service:
-                      name: atscale-ingress-gateway 
+                      # FIX 4: Changed service name from 'atscale-ingress-gateway' to 'atscale'
+                      # This matches the default release name since we removed values.yaml
+                      name: atscale
                       port:
                         number: 443
           EOF
           
           sudo microk8s kubectl apply -f ingress.yaml
 
-          # 7. Credentials
-          echo "=============================================="
+          # Credentials
           AS_USER=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdmin}" | base64 -d)
           AS_PASS=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdminPassword}" | base64 -d)
           echo "AtScale URL: https://$FQDN"
           echo "Username: $AS_USER"
           echo "Password: $AS_PASS"
-          echo "=============================================="
