@@ -10,12 +10,12 @@ This GitHub Action automatically provisions an Azure POC environment and deploys
 5. Configures HTTPS Ingress with self-signed certs.
 6. Prints the login credentials to the Action log.
 
+```mermaid
 flowchart LR
     %% Styles
     classDef user fill:#f3f6fc,stroke:#747775,stroke-width:1px,color:#1e1e1e;
     classDef internal fill:#e8f0fe,stroke:#747775,stroke-width:1px,color:#1e1e1e;
-    classDef note fill:#fff,stroke:none,font-style:italic,font-size:10pt;
-
+    
     subgraph User["User Experience (Declarative)"]
         direction TB
         UI[/"uses: atscale-inc/deploy-action
@@ -38,6 +38,7 @@ flowchart LR
 
     %% Layout hints
     linkStyle default stroke:#0b57d0,stroke-width:2px;
+```
 
 
 ## Usage
