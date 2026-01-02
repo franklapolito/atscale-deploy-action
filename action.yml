@@ -1,5 +1,5 @@
 name: 'Deploy AtScale POC'
-description: 'Provisions an Azure VM, installs MicroK8s, and deploys AtScale using a robust configuration strategy.'
+description: 'Provisions an Azure VM, installs MicroK8s, and deploys AtScale using robust service detection.'
 inputs:
   client_id: { description: 'Client Name', required: true }
   region: { description: 'Azure Region', required: false, default: 'eastus' }
@@ -44,7 +44,7 @@ runs:
 
           az vm open-port -g $RG -n $VM --port 22,80,443,16443,15432,11111 --priority 1010
 
-          # 2. Lock Static IP (Prevents IP drift on restart)
+          # 2. Lock Static IP
           PRIVATE_IP=$(az vm show -d -g $RG -n $VM --query privateIps -o tsv)
           NIC_ID=$(az vm show -g $RG -n $VM --query "networkProfile.networkInterfaces[0].id" -o tsv)
           NIC_NAME=$(basename $NIC_ID)
@@ -62,7 +62,6 @@ runs:
           fi
 
           # 3. Calculate FQDN & IP
-          # Use 'public-ip list' for reliable FQDN retrieval
           FQDN=$(az network public-ip list -g $RG --query "[0].dnsSettings.fqdn" -o tsv)
           IP=$(az vm show -d -g $RG -n $VM --query publicIps -o tsv)
           
@@ -71,7 +70,6 @@ runs:
 
     - name: Wait for Boot
       shell: bash
-      # Extended sleep to allow NIC to recover after Static IP lock
       run: sleep 120
 
     - name: Configure Software
@@ -101,7 +99,7 @@ runs:
           sudo microk8s enable hostpath-storage dns ingress
           sudo microk8s enable metallb:$PRIVATE_IP/32
 
-          # 3. Generate Certs & Namespace
+          # 3. Certs & Namespace
           openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
             -keyout tls.key -out tls.crt \
             -subj "/C=US/ST=MA/L=Boston/O=AtScale/CN=$FQDN"
@@ -114,8 +112,7 @@ runs:
           kubectl create namespace atscale --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
 
-          # 4. Generate values.yaml (Updated: Using printf for safety)
-          # We populate both global and specific scopes to ensure the chart picks it up.
+          # 4. Generate values.yaml (Printf ensures clean indentation)
           echo "Generating values.yaml..."
           printf "global:\n" > values.yaml
           printf "  ingressDomain: \"%s\"\n" "$FQDN" >> values.yaml
@@ -127,14 +124,7 @@ runs:
           printf "  tls:\n" >> values.yaml
           printf "    existingSecret: \"atscale-tls-secret\"\n" >> values.yaml
 
-          # DEBUG: Print content to log to verify structure
-          echo "--- Content of values.yaml ---"
-          cat values.yaml
-          echo "------------------------------"
-
           # 5. Deploy AtScale
-          # FIX: We use -f values.yaml BUT we also enforce global.ingressDomain via --set
-          # This acts as a 'Kill Switch' for the localhost bug.
           echo "Deploying AtScale..."
           helm upgrade --install atscale oci://registry-1.docker.io/atscaleinc/atscale \
             --version 2025.10.0 \
@@ -144,11 +134,34 @@ runs:
             --set global.ingressDomain=$FQDN \
             --wait --timeout 15m
 
-          # 6. Configure Ingress (Dynamic Service Detection)
+          # 6. Configure Ingress (FIXED: Robust Service Detection)
+          echo "--- DEBUG: Current Services ---"
+          sudo microk8s kubectl get svc -n atscale
+          echo "-------------------------------"
+
           echo "Detecting Service Name..."
-          SVC_NAME=$(sudo microk8s kubectl get svc -n atscale -o jsonpath='{.items[?(@.spec.ports[*].port==443)].metadata.name}' | head -n1)
-          if [ -z "$SVC_NAME" ]; then SVC_NAME="atscale"; fi
-          echo "Linking Ingress to Service: $SVC_NAME"
+          
+          # Priority 1: Check for the standard 'atscale-proxy' name (matches values.yaml)
+          if sudo microk8s kubectl get svc atscale-proxy -n atscale > /dev/null 2>&1; then
+             echo "Found standard service: atscale-proxy"
+             SVC_NAME="atscale-proxy"
+          # Priority 2: Check for 'atscale-ingress-gateway' (common alternate name)
+          elif sudo microk8s kubectl get svc atscale-ingress-gateway -n atscale > /dev/null 2>&1; then
+             echo "Found standard service: atscale-ingress-gateway"
+             SVC_NAME="atscale-ingress-gateway"
+          # Priority 3: Fallback to scanning for port 443 using grep (bypasses JSONPath bugs)
+          else
+             echo "Standard names not found. Scanning for port 443..."
+             SVC_NAME=$(sudo microk8s kubectl get svc -n atscale --no-headers -o custom-columns=":metadata.name,:spec.ports[*].port" | grep "443" | awk '{print $1}' | head -n1)
+          fi
+          
+          # Safety Net
+          if [ -z "$SVC_NAME" ]; then
+             echo "WARNING: Auto-detection failed. Defaulting to 'atscale' (Risk of 503)."
+             SVC_NAME="atscale"
+          fi
+          
+          echo ">>> TARGETING SERVICE: $SVC_NAME <<<"
 
           cat <<EOF > ingress.yaml
           apiVersion: networking.k8s.io/v1
