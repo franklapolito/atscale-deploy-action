@@ -54,8 +54,12 @@ OPEN_THRIFT="${OPEN_THRIFT:-false}"            # open 11111 only if a BI tool ne
 # Ports: 22 (ops), 443 (everything via proxy), 15432 (PGWire). 16443 (k8s API) is
 # deliberately NEVER opened (default-deny inbound keeps it closed).
 
-# Chart values knobs (§3.7)
-ENCRYPTION_SECRET_REF="${ENCRYPTION_SECRET_REF:-}"  # empty => let the chart generate the encryption key (fresh PoT)
+# Chart values knobs (§3.7). Encryption block matches the proven demo2 config:
+# empty existingSecret/key + the default key-name ref => the chart generates and
+# stores the encryption key under that name (verified on demo2 @ 2026.5.0).
+ENCRYPTION_EXISTING_SECRET="${ENCRYPTION_EXISTING_SECRET:-}"
+ENCRYPTION_SECRET_REF="${ENCRYPTION_SECRET_REF:-encryptionKey}"
+ENCRYPTION_KEY="${ENCRYPTION_KEY:-}"
 ENGINE_CPU="${ENGINE_CPU:-500m}"
 ENGINE_MEM="${ENGINE_MEM:-8Gi}"
 DB_SIZE="${DB_SIZE:-64Gi}"
@@ -266,10 +270,10 @@ render_values() {
     echo "      tlsCrt: \"${TLS_CRT_B64}\""
     echo "      tlsKey: \"${TLS_KEY_B64}\""
     echo "      caCerts: \"\""
-    if [ -n "$ENCRYPTION_SECRET_REF" ]; then
-      echo "    encryption:"
-      echo "      existingSecretEncryptionKeyRef: \"${ENCRYPTION_SECRET_REF}\""
-    fi
+    echo "    encryption:"
+    echo "      existingSecret: \"${ENCRYPTION_EXISTING_SECRET}\""
+    echo "      existingSecretEncryptionKeyRef: \"${ENCRYPTION_SECRET_REF}\""
+    echo "      key: \"${ENCRYPTION_KEY}\""
     echo "atscale-proxy:"
     echo "  service:"
     echo "    type: LoadBalancer"

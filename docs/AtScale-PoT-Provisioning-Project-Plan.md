@@ -140,6 +140,8 @@ The real `helm get values` / `kubectl get svc` baseline the Phase 1 generator sh
 
 *(Note: `resourcePreset: none` + explicit engine requests is the deliberate footprint tuning — keep it. `microk8s status` hangs on this box; not needed — the svc output already proves MetalLB is assigning the LB IP and no nginx ingress is in the path.)*
 
+**Parity re-confirmed 2026-06-30** via read-only `helm get values` on demo2: every §3.7 value matches the `deploy.sh` generator (engine 500m/8Gi, MCP on, proxy LB/replica 1, db 64Gi, `resourcePreset: none`, inline TLS, `caCerts: ""`, front door `atscale-ingress-gateway` LB on 80/443/11111/15432 @ 10.0.0.4). One delta found and fixed: demo2 sets `global.atscale.encryption` explicitly (`existingSecret: ""`, `existingSecretEncryptionKeyRef: encryptionKey`, `key: ""`) — the generator now emits that exact block by default (empty secret/key = chart generates + stores under that name).
+
 ---
 
 ## 4. Delivery model (confirmed)
