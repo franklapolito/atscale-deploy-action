@@ -1,0 +1,30 @@
+# --- Secrets / credentials — NEVER commit ---
+*.key
+*.pem
+*.pfx
+*.p12
+*.crt
+*.ca-bundle
+STAR_*.zip
+fullchain*
+id_rsa*
+*.kubeconfig
+kubeconfig
+.kube/
+.env
+.env.*
+azure-creds*.json
+*-sp.json
+
+# --- Runtime / generated artifacts ---
+# deploy.sh writes the per-env values.yaml here; it embeds the wildcard TLS key.
+runtime/
+generated/
+*.generated.yaml
+tmp/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
