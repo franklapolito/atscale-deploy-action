@@ -1,206 +1,56 @@
-name: 'Deploy AtScale POC'
-description: 'Provisions an Azure VM, installs MicroK8s, and deploys AtScale using robust service detection.'
+name: 'Deploy AtScale PoT'
+description: 'Provisions one self-contained Azure VM (MicroK8s + Helm) and deploys AtScale via the chart''s own atscale-ingress-gateway LoadBalancer.'
+
 inputs:
-  client_id: { description: 'Client Name', required: true }
-  region: { description: 'Azure Region', required: false, default: 'eastus' }
-  azure_client_id: { description: 'Azure Client ID', required: true }
-  azure_tenant_id: { description: 'Azure Tenant ID', required: true }
-  azure_subscription_id: { description: 'Azure Subscription ID', required: true }
-  ssh_public_key: { description: 'SSH Public Key', required: true }
-  ssh_private_key: { description: 'SSH Private Key', required: true }
+  client_id:             { description: 'Client / prospect name (e.g. acme) — drives naming + <client>.atscalehosted.com', required: true }
+  region:                { description: 'Azure region', required: false, default: 'eastus' }
+  vm_size:               { description: 'VM size (D1: proven default E8s_v3; bump to D16s_v5 for more concurrency)', required: false, default: 'Standard_E8s_v3' }
+  chart_version:         { description: 'AtScale chart version (floor C2026.5.1+)', required: false, default: '2026.5.1' }
+  base_domain:           { description: 'Apex domain for the wildcard cert', required: false, default: 'atscalehosted.com' }
+  open_thrift:           { description: 'Open port 11111 (Thrift) — only if a BI tool needs it', required: false, default: 'false' }
+  keyvault:              { description: 'Key Vault holding the wildcard key (and cert, if not passed inline)', required: false, default: 'se-demo-keyvault' }
+  cert_secret:           { description: 'Public cert secret name (KV fallback when cert_pem is empty)', required: false, default: 'atscalehosted-com-cert' }
+  key_secret:            { description: 'Private key secret name (base64 PEM)', required: false, default: 'atscalehosted-com-cert-private-key' }
+  cert_pem:              { description: 'Fullchain cert PEM (leaf + intermediates) supplied inline instead of from KV — e.g. a GitHub secret', required: false, default: '' }
+  key_pem:               { description: 'Private key PEM supplied inline instead of from KV', required: false, default: '' }
+  cloudflare_api_token:  { description: 'Cloudflare token for DNS A-record (Phase 2; omit for manual v1)', required: false, default: '' }
+  cloudflare_zone_id:    { description: 'Cloudflare zone id for atscalehosted.com (Phase 2)', required: false, default: '' }
+  azure_client_id:       { description: 'Azure client id (OIDC)', required: true }
+  azure_tenant_id:       { description: 'Azure tenant id', required: true }
+  azure_subscription_id: { description: 'Azure subscription id', required: true }
+  ssh_public_key:        { description: 'SSH public key', required: true }
+  ssh_private_key:       { description: 'SSH private key', required: true }
 
 runs:
   using: "composite"
   steps:
-    - name: Azure Login
-      uses: azure/login@v1
+    - name: Azure Login (OIDC)
+      uses: azure/login@v2
       with:
         client-id: ${{ inputs.azure_client_id }}
         tenant-id: ${{ inputs.azure_tenant_id }}
         subscription-id: ${{ inputs.azure_subscription_id }}
 
-    - name: Provision Infrastructure
-      id: infra
-      uses: azure/cli@v1
-      with:
-        inlineScript: |
-          RG="rg-poc-${{ inputs.client_id }}"
-          VM="vm-atscale-${{ inputs.client_id }}"
-          DNS="atscale-${{ inputs.client_id }}"
-          
-          # 1. Create Resources
-          az group create --name $RG --location ${{ inputs.region }} --tags Lifecycle=POC
-          az vm create \
-            --resource-group $RG \
-            --name $VM \
-            --image Ubuntu2404 \
-            --admin-username atscale \
-            --ssh-key-values "${{ inputs.ssh_public_key }}" \
-            --size Standard_DC2ds_v3 \
-            --public-ip-sku Standard \
-            --public-ip-address-dns-name $DNS \
-            --tags Lifecycle=POC Schedule=BusinessHours \
-            --os-disk-size-gb 256
-
-          az vm open-port -g $RG -n $VM --port 22,80,443,16443,15432,11111 --priority 1010
-
-          # 2. Lock Static IP
-          PRIVATE_IP=$(az vm show -d -g $RG -n $VM --query privateIps -o tsv)
-          NIC_ID=$(az vm show -g $RG -n $VM --query "networkProfile.networkInterfaces[0].id" -o tsv)
-          NIC_NAME=$(basename $NIC_ID)
-          IP_CONFIG_NAME=$(az network nic show --ids $NIC_ID --query "ipConfigurations[0].name" -o tsv)
-          
-          if [ -z "$PRIVATE_IP" ] || [ -z "$IP_CONFIG_NAME" ]; then
-             echo "Error: IP detection failed. Skipping Static Lock."
-          else
-             az network nic ip-config update \
-                --resource-group $RG \
-                --nic-name $NIC_NAME \
-                --name $IP_CONFIG_NAME \
-                --set privateIPAllocationMethod=Static \
-                --private-ip-address $PRIVATE_IP
-          fi
-
-          # 3. Calculate FQDN & IP
-          FQDN=$(az network public-ip list -g $RG --query "[0].dnsSettings.fqdn" -o tsv)
-          IP=$(az vm show -d -g $RG -n $VM --query publicIps -o tsv)
-          
-          echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
-          echo "public_ip=$IP" >> $GITHUB_OUTPUT
-
-    - name: Wait for Boot
+    - name: Provision + deploy
       shell: bash
-      run: sleep 120
-
-    - name: Configure Software
-      uses: appleboy/ssh-action@master
-      with:
-        host: ${{ steps.infra.outputs.public_ip }}
-        username: atscale
-        key: ${{ inputs.ssh_private_key }}
-        timeout: 20m
-        script: |
-          # 1. Hostname Setup
-          echo "${{ steps.infra.outputs.fqdn }}" > hostname
-          FQDN=$(cat hostname)
-          if [ -z "$FQDN" ]; then FQDN="${{ steps.infra.outputs.public_ip }}"; fi
-          echo "Configuring AtScale for: $FQDN"
-
-          # 2. Install MicroK8s & Tools
-          export PATH=$PATH:/snap/bin
-          sudo snap install microk8s --classic
-          sudo snap install helm --classic
-          sudo snap install kubectl --classic
-          sudo swapoff -a
-          sudo sed -i '/swap/d' /etc/fstab
-
-          PRIVATE_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
-          sudo microk8s status --wait-ready
-          sudo microk8s enable hostpath-storage dns ingress
-          sudo microk8s enable metallb:$PRIVATE_IP/32
-
-          # 3. Certs & Namespace
-          openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
-            -keyout tls.key -out tls.crt \
-            -subj "/C=US/ST=MA/L=Boston/O=AtScale/CN=$FQDN"
-            
-          mkdir -p /home/atscale/.kube
-          sudo microk8s config > /home/atscale/.kube/config
-          sudo chown -R atscale:atscale /home/atscale/.kube
-          chmod 600 /home/atscale/.kube/config
-          
-          kubectl create namespace atscale --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret tls atscale-tls-secret --cert=tls.crt --key=tls.key -n atscale --dry-run=client -o yaml | kubectl apply -f -
-
-          # 4. Generate values.yaml (Printf ensures clean indentation)
-          echo "Generating values.yaml..."
-          printf "global:\n" > values.yaml
-          printf "  ingressDomain: \"%s\"\n" "$FQDN" >> values.yaml
-          printf "  atscale:\n" >> values.yaml
-          printf "    externalHostname: \"%s\"\n" "$FQDN" >> values.yaml
-          printf "    tls:\n" >> values.yaml
-          printf "      existingSecret: \"atscale-tls-secret\"\n" >> values.yaml
-          printf "atscale-proxy:\n" >> values.yaml
-          printf "  tls:\n" >> values.yaml
-          printf "    existingSecret: \"atscale-tls-secret\"\n" >> values.yaml
-
-          # 5. Deploy AtScale
-          echo "Deploying AtScale..."
-          helm upgrade --install atscale oci://registry-1.docker.io/atscaleinc/atscale \
-            --version 2025.10.0 \
-            -n atscale \
-            --kubeconfig /home/atscale/.kube/config \
-            -f values.yaml \
-            --set global.ingressDomain=$FQDN \
-            --wait --timeout 15m
-
-          # 6. Configure Ingress (FIXED: Robust Service Detection)
-          echo "--- DEBUG: Current Services ---"
-          sudo microk8s kubectl get svc -n atscale
-          echo "-------------------------------"
-
-          echo "Detecting Service Name..."
-          
-          # Priority 1: Check for the standard 'atscale-proxy' name (matches values.yaml)
-          if sudo microk8s kubectl get svc atscale-proxy -n atscale > /dev/null 2>&1; then
-             echo "Found standard service: atscale-proxy"
-             SVC_NAME="atscale-proxy"
-          # Priority 2: Check for 'atscale-ingress-gateway' (common alternate name)
-          elif sudo microk8s kubectl get svc atscale-ingress-gateway -n atscale > /dev/null 2>&1; then
-             echo "Found standard service: atscale-ingress-gateway"
-             SVC_NAME="atscale-ingress-gateway"
-          # Priority 3: Fallback to scanning for port 443 using grep (bypasses JSONPath bugs)
-          else
-             echo "Standard names not found. Scanning for port 443..."
-             SVC_NAME=$(sudo microk8s kubectl get svc -n atscale --no-headers -o custom-columns=":metadata.name,:spec.ports[*].port" | grep "443" | awk '{print $1}' | head -n1)
-          fi
-          
-          # Safety Net
-          if [ -z "$SVC_NAME" ]; then
-             echo "WARNING: Auto-detection failed. Defaulting to 'atscale' (Risk of 503)."
-             SVC_NAME="atscale"
-          fi
-          
-          echo ">>> TARGETING SERVICE: $SVC_NAME <<<"
-
-          cat <<EOF > ingress.yaml
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: atscale-ui-ingress
-            namespace: atscale
-            annotations:
-              nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-              nginx.ingress.kubernetes.io/proxy-ssl-verify: "false"
-              nginx.ingress.kubernetes.io/proxy-body-size: "0"
-              nginx.ingress.kubernetes.io/configuration-snippet: |
-                proxy_set_header Host \$host;
-          spec:
-            ingressClassName: public
-            tls:
-            - hosts:
-              - $FQDN
-              secretName: atscale-tls-secret
-            rules:
-            - host: $FQDN
-              http:
-                paths:
-                - path: /
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: $SVC_NAME
-                      port:
-                        number: 443
-          EOF
-          
-          sudo microk8s kubectl apply -f ingress.yaml
-
-          # 7. Output Credentials
-          AS_USER=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdmin}" | base64 -d)
-          AS_PASS=$(sudo microk8s kubectl get secret --namespace atscale atscale-kc-users -o jsonpath="{.data.atscaleAdminPassword}" | base64 -d)
-          echo "=============================================="
-          echo "AtScale URL: https://$FQDN"
-          echo "Username: $AS_USER"
-          echo "Password: $AS_PASS"
-          echo "=============================================="
+      working-directory: ${{ github.action_path }}
+      env:
+        CLIENT_ID:            ${{ inputs.client_id }}
+        REGION:               ${{ inputs.region }}
+        VM_SIZE:              ${{ inputs.vm_size }}
+        CHART_VERSION:        ${{ inputs.chart_version }}
+        BASE_DOMAIN:          ${{ inputs.base_domain }}
+        OPEN_THRIFT:          ${{ inputs.open_thrift }}
+        SUBSCRIPTION:         ${{ inputs.azure_subscription_id }}
+        KEYVAULT:             ${{ inputs.keyvault }}
+        CERT_SECRET:          ${{ inputs.cert_secret }}
+        KEY_SECRET:           ${{ inputs.key_secret }}
+        CERT_PEM:             ${{ inputs.cert_pem }}
+        KEY_PEM:              ${{ inputs.key_pem }}
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_api_token }}
+        CLOUDFLARE_ZONE_ID:   ${{ inputs.cloudflare_zone_id }}
+        SSH_PUBLIC_KEY:       ${{ inputs.ssh_public_key }}
+        SSH_PRIVATE_KEY:      ${{ inputs.ssh_private_key }}
+      run: |
+        chmod +x ./deploy.sh ./scripts/bootstrap-node.sh
+        ./deploy.sh create
