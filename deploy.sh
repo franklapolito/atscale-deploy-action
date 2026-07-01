@@ -224,8 +224,9 @@ validate_tls() {
   have openssl || { log "WARNING: openssl not found — skipping TLS validation"; return 0; }
   local d; d="$(mktemp -d)"
   trap 'rm -rf "$d"' RETURN
-  printf '%s' "$TLS_CRT_B64" | base64 -d > "$d/crt.pem" 2>/dev/null || die "TLS cert is not valid base64"
-  printf '%s' "$TLS_KEY_B64" | base64 -d > "$d/key.pem" 2>/dev/null || die "TLS key is not valid base64"
+  # openssl base64 -d is portable (BSD/macOS `base64` wants -D, GNU wants -d).
+  printf '%s' "$TLS_CRT_B64" | openssl base64 -d -A > "$d/crt.pem" 2>/dev/null || die "TLS cert is not valid base64"
+  printf '%s' "$TLS_KEY_B64" | openssl base64 -d -A > "$d/key.pem" 2>/dev/null || die "TLS key is not valid base64"
 
   openssl x509 -in "$d/crt.pem" -noout 2>/dev/null || die "TLS cert: first PEM block is not a valid certificate"
 
