@@ -1,6 +1,6 @@
 # AtScale Proof-of-Technology (PoT) Environment Provisioning — Project Plan
 
-**Owner:** Frank · **Status:** v1.0 (§3.6 CLOSED — cert vault + DNS provider confirmed; Phase 1 build underway) · **Last updated:** 2026-06-30
+**Owner:** Frank · **Status:** v1.1 (§3.6 CLOSED; **Phase 1 VALIDATED by first live PoT** — `aig` @ westus2, chart 2026.5.0, ~8.5 min, serving the wildcard cert) · **Last updated:** 2026-06-30
 
 > Living document. v1.0 closes §3.6 (the last blocker): the `*.atscalehosted.com` wildcard private key is confirmed in **`se-demo-keyvault`** (secret `atscalehosted-com-cert-private-key`, base64 PEM), and `atscalehosted.com` DNS is hosted in **Cloudflare** — option A is adopted, with a **manual A record per PoT for v1** (Cloudflare-API automation deferred to Phase 2). Architecture fully pinned; recon complete; Phase 1 build (refactored `action.yml` + shared `deploy.sh`) is underway. **Target version floor: C2026.5.1+** (demo runs 2026.5.0).
 
@@ -215,13 +215,13 @@ az keyvault secret list --vault-name se-demo-keyvault --query "[].name" -o table
 ## 8. Risks
 - **Cost runaway** — `E8s_v3` is ~8× the dev box; un-torn-down envs bill fast. Tag-driven lifecycle (Phase 3); manual tracking until then.
 - ~~Cert/DNS domain mismatch~~ **RESOLVED (§3.6):** cert private key confirmed in `se-demo-keyvault`; `atscalehosted.com` DNS in Cloudflare. Per-env DNS reservation is **manual for v1** (no longer a blocker); residual risk is the manual A-record step until Cloudflare-API automation lands in Phase 2.
-- **vCPU quota** — `E8s_v3` = 8 cores each (half of `D16s_v5`), so the proven default is quota-friendly; still, concurrent PoTs add up → multi-region spread (already in use: East US / Central US) + a quota pre-flight check before provisioning.
+- **vCPU quota** — `E8s_v3` = 8 cores each (half of `D16s_v5`), so the proven default is quota-friendly; still, concurrent PoTs add up → multi-region spread (already in use: East US / Central US) + a quota pre-flight check before provisioning. **Pre-flight must check BOTH the `Total Regional vCPUs` cap AND the specific `Standard ESv3 Family vCPUs` cap — either can block.** Measured in the se-demo sub (2026-06-30): **eastus** ESv3 family is near-full (16/20 → 4 free, blocked); **eastus2/centralus** hit the low default *regional* cap (10; 6/2 free, blocked); **westus2 / westus3 / southcentralus / westus** have both ≥8 free → viable. First AIG PoT landed in **westus2**. Fresh regions default to a regional core cap of 10 — request an increase before running several PoTs in one region.
 - **License egress** — if networking is ever locked down, the engine must still reach the license/billing URIs (§3.5) or it won't validate.
 - **Version parity** — baseline (§3.7) was read at 2026.5.0; target floor is 2026.5.1. Re-confirm the values structure is unchanged on 2026.5.1 before locking the generator (minor patch — low risk).
 
 ---
 
 ## 9. Immediate next steps
-1. ✅ **Recon done** — §3.6 closed (cert in `se-demo-keyvault`; DNS in Cloudflare). Optional: name the companion public-cert secret via one read-only `az keyvault secret list`.
-2. **In progress:** **Phase 1** = refactored `action.yml` + shared `deploy.sh`, built on the §3.7 baseline (`E8s_v3`, `atscale-ingress-gateway` LB, MetalLB, inline wildcard cert, MCP on, footprint tuning, NSG/egress). DNS-reservation is a **generic Cloudflare-ready stub** (manual A record for v1).
-3. Validate values parity at chart **2026.5.1**; confirm public-cert secret name; wire Cloudflare API token (Phase 2).
+1. ✅ **Recon done** — §3.6 closed (cert in `se-demo-keyvault`; DNS in Cloudflare).
+2. ✅ **Phase 1 built + MERGED** (PR #1) and **validated by a live deploy**: `aig` PoT @ **westus2**, chart **2026.5.0**, provisioned in ~8.5 min. Verified serving `*.atscalehosted.com` (trusted chain), front door `atscale-ingress-gateway` LB on 80/443/11111/15432, 16443 closed, MicroK8s `dns/hostpath-storage/metallb` only. VM `vm-atscale-aig`, public IP `20.69.155.236`.
+3. **Next:** validate parity at chart **2026.5.1** (live run used 2026.5.0); wire Cloudflare API for DNS (Phase 2); tag a release (`v1`) of the action; tag-driven lifecycle/teardown (Phase 3). Tear down the `aig` test PoT when done (`az group delete -n rg-poc-aig`).
