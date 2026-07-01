@@ -335,6 +335,22 @@ print_summary() {
   echo "=============================================="
 }
 
+# Emit composite-Action step outputs (the chaining contract — see
+# docs/combined-workflow-design.md §4). No-op locally; writes to $GITHUB_OUTPUT
+# only in CI. deploy.sh owns the derived values (public IP, Azure FQDN) that
+# action.yml can't cheaply recompute, so it writes them here directly.
+emit_github_outputs() {
+  [ -n "${GITHUB_OUTPUT:-}" ] || return 0
+  {
+    echo "ingress_domain=${INGRESS_DOMAIN}"
+    echo "engine_url=https://${INGRESS_DOMAIN}"
+    echo "public_ip=${PUBLIC_IP:-}"
+    echo "azure_fqdn=${FQDN:-}"
+    echo "resource_group=${RG}"
+  } >> "$GITHUB_OUTPUT"
+  log "wrote step outputs (ingress_domain, engine_url, public_ip, azure_fqdn, resource_group)"
+}
+
 on_error() {
   echo "----------------------------------------------------------------" >&2
   echo "DEPLOY FAILED for PoT '${CLIENT_ID}'." >&2
@@ -374,6 +390,7 @@ case "$cmd" in
     bootstrap_node
     reserve_dns
     print_summary
+    emit_github_outputs
     ;;
   *)
     die "unknown subcommand '$cmd' (use: create | render-values | dns-record)"

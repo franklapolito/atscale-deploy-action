@@ -1,0 +1,96 @@
+name: Smoke test — deploy-action (Azure VM + AtScale)
+
+# CI proof of the composite Action against REAL Azure: provisions one VM
+# (BILLABLE, ~8-9 min), verifies the emitted step outputs, then deletes the
+# resource group. This is the piece local deploy.sh testing can't reach.
+#
+# Prerequisites (repo secrets + Azure setup):
+#   AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID — an Azure AD app
+#     with a FEDERATED CREDENTIAL trusting this repo (OIDC), Contributor on the
+#     subscription/RG scope, and `get` on the se-demo-keyvault secrets.
+#   SSH_PUBLIC_KEY / SSH_PRIVATE_KEY — VM admin key-pair.
+#   CERT_PEM (optional) — wildcard fullchain PEM; if unset, deploy.sh falls back
+#     to the Key Vault cert secret.
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: 'Throwaway client id (drives rg-poc-<client>)'
+        required: true
+        default: 'citest'
+      region:
+        description: 'Azure region (must have >=8 free ESv3 + regional cores on se-demo)'
+        default: 'westus3'
+      teardown:
+        description: 'Delete the resource group after the run'
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision (composite Action under test)
+        id: deploy
+        uses: ./
+        with:
+          client_id:             ${{ inputs.client_id }}
+          region:                ${{ inputs.region }}
+          chart_version:         '2026.5.0'   # proven version; isolates the Action-path test from 2026.5.1 parity
+          azure_client_id:       ${{ secrets.AZURE_CLIENT_ID }}
+          azure_tenant_id:       ${{ secrets.AZURE_TENANT_ID }}
+          azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ssh_public_key:        ${{ secrets.SSH_PUBLIC_KEY }}
+          ssh_private_key:       ${{ secrets.SSH_PRIVATE_KEY }}
+          cert_pem:              ${{ secrets.CERT_PEM }}
+
+      - name: Verify emitted outputs
+        shell: bash
+        env:
+          INGRESS: ${{ steps.deploy.outputs.ingress_domain }}
+          ENGINE:  ${{ steps.deploy.outputs.engine_url }}
+          PUBIP:   ${{ steps.deploy.outputs.public_ip }}
+          FQDN:    ${{ steps.deploy.outputs.azure_fqdn }}
+          RG:      ${{ steps.deploy.outputs.resource_group }}
+          CID:     ${{ inputs.client_id || 'citest' }}
+        run: |
+          set -euo pipefail
+          echo "ingress_domain = $INGRESS"
+          echo "engine_url     = $ENGINE"
+          echo "public_ip      = $PUBIP"
+          echo "azure_fqdn     = $FQDN"
+          echo "resource_group = $RG"
+          test "$INGRESS" = "${CID}.atscalehosted.com"          || { echo "::error::ingress_domain: $INGRESS"; exit 1; }
+          test "$ENGINE"  = "https://${CID}.atscalehosted.com"  || { echo "::error::engine_url: $ENGINE"; exit 1; }
+          [[ "$PUBIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]    || { echo "::error::public_ip not an IPv4: $PUBIP"; exit 1; }
+          test "$RG"      = "rg-poc-${CID}"                     || { echo "::error::resource_group: $RG"; exit 1; }
+          echo "outputs OK"
+
+      - name: Azure login (for teardown)
+        if: ${{ always() && (inputs.teardown || github.event_name == 'push') }}
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Teardown (delete resource group)
+        if: ${{ always() && inputs.teardown }}
+        shell: bash
+        env:
+          CID: ${{ inputs.client_id }}
+        run: |
+          set -euo pipefail
+          rg="rg-poc-${CID}"
+          if [ "$(az group exists -n "$rg")" = "true" ]; then
+            az group delete -n "$rg" --yes
+            echo "deleted $rg"
+          else
+            echo "$rg does not exist — nothing to delete"
+          fi

@@ -21,6 +21,23 @@ inputs:
   ssh_public_key:        { description: 'SSH public key', required: true }
   ssh_private_key:       { description: 'SSH private key', required: true }
 
+outputs:
+  ingress_domain:
+    description: 'PoT hostname (<client>.atscalehosted.com) — the AtScale front door once DNS resolves'
+    value: ${{ steps.deploy.outputs.ingress_domain }}
+  engine_url:
+    description: 'Design-center / engine URL (https://<client>.atscalehosted.com) — hand to ps-utils as the atscale: connection url'
+    value: ${{ steps.deploy.outputs.engine_url }}
+  public_ip:
+    description: 'LoadBalancer public IP — for /etc/hosts injection so a runner can reach ingress_domain before DNS (design §3.2c)'
+    value: ${{ steps.deploy.outputs.public_ip }}
+  azure_fqdn:
+    description: 'Azure public-IP FQDN (fallback hostname)'
+    value: ${{ steps.deploy.outputs.azure_fqdn }}
+  resource_group:
+    description: 'Azure resource group (rg-poc-<client>) — for later teardown'
+    value: ${{ steps.deploy.outputs.resource_group }}
+
 runs:
   using: "composite"
   steps:
@@ -32,6 +49,7 @@ runs:
         subscription-id: ${{ inputs.azure_subscription_id }}
 
     - name: Provision + deploy
+      id: deploy
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
