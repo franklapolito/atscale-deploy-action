@@ -20,6 +20,8 @@ inputs:
   azure_subscription_id: { description: 'Azure subscription id', required: true }
   ssh_public_key:        { description: 'SSH public key', required: true }
   ssh_private_key:       { description: 'SSH private key', required: true }
+  atscale_admin_user:     { description: 'AtScale design-center admin username (chart users.atscale)', required: false, default: 'atscale-kc-admin' }
+  atscale_admin_password: { description: 'AtScale design-center admin password — set deterministically for downstream ps-utils auth; auto-generated if empty', required: false, default: '' }
 
 outputs:
   ingress_domain:
@@ -37,6 +39,12 @@ outputs:
   resource_group:
     description: 'Azure resource group (rg-poc-<client>) — for later teardown'
     value: ${{ steps.deploy.outputs.resource_group }}
+  atscale_admin_user:
+    description: 'AtScale design-center admin username — hand to ps-utils as the atscale: connection user'
+    value: ${{ steps.deploy.outputs.atscale_admin_user }}
+  atscale_admin_password:
+    description: 'AtScale design-center admin password (masked) — the atscale: connection password for ps-utils'
+    value: ${{ steps.deploy.outputs.atscale_admin_password }}
 
 runs:
   using: "composite"
@@ -69,6 +77,8 @@ runs:
         CLOUDFLARE_ZONE_ID:   ${{ inputs.cloudflare_zone_id }}
         SSH_PUBLIC_KEY:       ${{ inputs.ssh_public_key }}
         SSH_PRIVATE_KEY:      ${{ inputs.ssh_private_key }}
+        ATSCALE_ADMIN_USER:     ${{ inputs.atscale_admin_user }}
+        ATSCALE_ADMIN_PASSWORD: ${{ inputs.atscale_admin_password }}
       run: |
         chmod +x ./deploy.sh ./scripts/bootstrap-node.sh
         ./deploy.sh create

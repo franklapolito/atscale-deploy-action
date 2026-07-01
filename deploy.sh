@@ -60,6 +60,16 @@ ENGINE_CPU="${ENGINE_CPU:-500m}"
 ENGINE_MEM="${ENGINE_MEM:-8Gi}"
 DB_SIZE="${DB_SIZE:-64Gi}"
 
+# AtScale design-center admin creds. Set deterministically so downstream tooling
+# (ps-utils via atscale-pot-bundle) can authenticate — chained into the emitted
+# outputs. Password auto-generated if unset. This is the chart's `users.atscale`
+# identity (the SML/API admin). NOTE: the chart reuses an existing
+# <release>-kc-users secret on re-deploy, so this only takes effect on a FRESH
+# install (one PoT = one fresh install); pass ATSCALE_ADMIN_PASSWORD for
+# determinism across re-runs.
+ATSCALE_ADMIN_USER="${ATSCALE_ADMIN_USER:-atscale-kc-admin}"
+ATSCALE_ADMIN_PASSWORD="${ATSCALE_ADMIN_PASSWORD:-$(openssl rand -hex 16 2>/dev/null || echo "AtScalePoT${RANDOM}${RANDOM}")}"
+
 # DNS (Cloudflare — §3.6). If a token+zone are present we could call the API;
 # for v1 the stub just prints the record the operator adds manually.
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
@@ -271,6 +281,12 @@ render_values() {
       echo "    encryption:"
       echo "      existingSecretEncryptionKeyRef: \"${ENCRYPTION_SECRET_REF}\""
     fi
+    # Deterministic design-center admin (chart users.atscale) so ps-utils can log in.
+    echo "    keycloak:"
+    echo "      users:"
+    echo "        atscale:"
+    echo "          username: \"${ATSCALE_ADMIN_USER}\""
+    echo "          password: \"${ATSCALE_ADMIN_PASSWORD}\""
     echo "atscale-proxy:"
     echo "  service:"
     echo "    type: LoadBalancer"
@@ -341,14 +357,17 @@ print_summary() {
 # action.yml can't cheaply recompute, so it writes them here directly.
 emit_github_outputs() {
   [ -n "${GITHUB_OUTPUT:-}" ] || return 0
+  echo "::add-mask::${ATSCALE_ADMIN_PASSWORD}"   # keep the admin password out of CI logs
   {
     echo "ingress_domain=${INGRESS_DOMAIN}"
     echo "engine_url=https://${INGRESS_DOMAIN}"
     echo "public_ip=${PUBLIC_IP:-}"
     echo "azure_fqdn=${FQDN:-}"
     echo "resource_group=${RG}"
+    echo "atscale_admin_user=${ATSCALE_ADMIN_USER}"
+    echo "atscale_admin_password=${ATSCALE_ADMIN_PASSWORD}"
   } >> "$GITHUB_OUTPUT"
-  log "wrote step outputs (ingress_domain, engine_url, public_ip, azure_fqdn, resource_group)"
+  log "wrote step outputs (ingress_domain, engine_url, public_ip, azure_fqdn, resource_group, atscale_admin_user, atscale_admin_password[masked])"
 }
 
 on_error() {
