@@ -1,0 +1,112 @@
+-- provision.sql.tmpl — per-PoT Snowflake footprint (rendered by `snowctl`).
+--
+-- Rendered with envsubst against an EXPLICIT variable allow-list (see snowctl):
+--   ${C_UPPER}      uppercase client id  -> object-name component (POT_<C>_...)
+--   ${C_LOWER}      lowercase client id  -> tag value + comments
+--   ${PUBKEY}       RSA public key body (base64, no PEM header/newlines)
+--   ${WH_S_SIZE}    ${WH_M_SIZE} ${WH_L_SIZE}   warehouse sizes (SMALL/MEDIUM/LARGE)
+--   ${AUTO_SUSPEND} warehouse auto-suspend seconds
+--   ${EXPIRY}       pot_expiry tag value (YYYY-MM-DD)
+--
+-- Everything is namespaced POT_${C_UPPER}_ and every statement is idempotent
+-- (CREATE ... IF NOT EXISTS / GRANT is repeatable / ALTER converges). Nothing
+-- here grants an account-wide privilege — the service principal can only touch
+-- its own PoT objects. Requires POT_ADMIN.TAGS (run `snowctl bootstrap` first).
+
+-- ---------------------------------------------------------------------------
+-- 1. Database + schemas
+-- ---------------------------------------------------------------------------
+CREATE DATABASE IF NOT EXISTS POT_${C_UPPER}_DB
+  COMMENT = 'AtScale PoT ${C_LOWER} — data substrate.';
+
+CREATE SCHEMA IF NOT EXISTS POT_${C_UPPER}_DB.SOURCE
+  COMMENT = 'AtScale PoT ${C_LOWER} — data-generation target + AtScale read.';
+
+CREATE SCHEMA IF NOT EXISTS POT_${C_UPPER}_DB.AGGREGATES
+  COMMENT = 'AtScale PoT ${C_LOWER} — AtScale aggregate read/write.';
+
+-- ---------------------------------------------------------------------------
+-- 2. Warehouses (per-PoT for clean credit attribution; suspended by default)
+-- ---------------------------------------------------------------------------
+CREATE WAREHOUSE IF NOT EXISTS POT_${C_UPPER}_WH_S
+  WAREHOUSE_SIZE = '${WH_S_SIZE}' AUTO_SUSPEND = ${AUTO_SUSPEND} AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE COMMENT = 'AtScale PoT ${C_LOWER} — small.';
+
+CREATE WAREHOUSE IF NOT EXISTS POT_${C_UPPER}_WH_M
+  WAREHOUSE_SIZE = '${WH_M_SIZE}' AUTO_SUSPEND = ${AUTO_SUSPEND} AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE COMMENT = 'AtScale PoT ${C_LOWER} — medium (default).';
+
+CREATE WAREHOUSE IF NOT EXISTS POT_${C_UPPER}_WH_L
+  WAREHOUSE_SIZE = '${WH_L_SIZE}' AUTO_SUSPEND = ${AUTO_SUSPEND} AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE COMMENT = 'AtScale PoT ${C_LOWER} — large.';
+
+-- ---------------------------------------------------------------------------
+-- 3. Role — scoped to ONLY this PoT (no account-wide grants)
+-- ---------------------------------------------------------------------------
+CREATE ROLE IF NOT EXISTS POT_${C_UPPER}_ROLE
+  COMMENT = 'AtScale PoT ${C_LOWER} — scoped read/write on its own DB + warehouses only.';
+
+-- USAGE on the database, both schemas, and the three warehouses.
+GRANT USAGE ON DATABASE POT_${C_UPPER}_DB              TO ROLE POT_${C_UPPER}_ROLE;
+GRANT USAGE ON SCHEMA POT_${C_UPPER}_DB.SOURCE         TO ROLE POT_${C_UPPER}_ROLE;
+GRANT USAGE ON SCHEMA POT_${C_UPPER}_DB.AGGREGATES     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT USAGE ON WAREHOUSE POT_${C_UPPER}_WH_S           TO ROLE POT_${C_UPPER}_ROLE;
+GRANT USAGE ON WAREHOUSE POT_${C_UPPER}_WH_M           TO ROLE POT_${C_UPPER}_ROLE;
+GRANT USAGE ON WAREHOUSE POT_${C_UPPER}_WH_L           TO ROLE POT_${C_UPPER}_ROLE;
+
+-- Object creation: data-gen creates tables in SOURCE; AtScale writes aggregate
+-- tables/views in AGGREGATES.
+GRANT CREATE TABLE, CREATE VIEW ON SCHEMA POT_${C_UPPER}_DB.SOURCE     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT CREATE TABLE, CREATE VIEW ON SCHEMA POT_${C_UPPER}_DB.AGGREGATES TO ROLE POT_${C_UPPER}_ROLE;
+
+-- DML on EXISTING tables (idempotent re-runs after data lands).
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA POT_${C_UPPER}_DB.SOURCE     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA POT_${C_UPPER}_DB.AGGREGATES TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT ON ALL VIEWS IN SCHEMA POT_${C_UPPER}_DB.SOURCE     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT ON ALL VIEWS IN SCHEMA POT_${C_UPPER}_DB.AGGREGATES TO ROLE POT_${C_UPPER}_ROLE;
+
+-- DML on FUTURE tables (data-gen does DROP/CREATE; AtScale creates aggregates).
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON FUTURE TABLES IN SCHEMA POT_${C_UPPER}_DB.SOURCE     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON FUTURE TABLES IN SCHEMA POT_${C_UPPER}_DB.AGGREGATES TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT ON FUTURE VIEWS IN SCHEMA POT_${C_UPPER}_DB.SOURCE     TO ROLE POT_${C_UPPER}_ROLE;
+GRANT SELECT ON FUTURE VIEWS IN SCHEMA POT_${C_UPPER}_DB.AGGREGATES TO ROLE POT_${C_UPPER}_ROLE;
+
+-- Management hygiene: let SYSADMIN see/manage the role (does NOT widen the SP).
+GRANT ROLE POT_${C_UPPER}_ROLE TO ROLE SYSADMIN;
+
+-- ---------------------------------------------------------------------------
+-- 4. Service principal — TYPE=SERVICE (password-less, key-pair only)
+-- ---------------------------------------------------------------------------
+CREATE USER IF NOT EXISTS POT_${C_UPPER}_SVC
+  TYPE = SERVICE
+  COMMENT = 'AtScale PoT ${C_LOWER} — ps-utils service principal (key-pair auth).';
+
+-- ALTER converges an existing user to the current key/defaults (idempotent
+-- re-provision reuses the same key when runtime/<c>_snowflake_key.p8 exists).
+ALTER USER POT_${C_UPPER}_SVC SET
+  RSA_PUBLIC_KEY    = '${PUBKEY}'
+  DEFAULT_ROLE      = POT_${C_UPPER}_ROLE
+  DEFAULT_WAREHOUSE = POT_${C_UPPER}_WH_M;
+
+GRANT ROLE POT_${C_UPPER}_ROLE TO USER POT_${C_UPPER}_SVC;
+
+-- ---------------------------------------------------------------------------
+-- 5. Tags (cost attribution — resolved from POT_ADMIN.TAGS)
+-- ---------------------------------------------------------------------------
+ALTER DATABASE POT_${C_UPPER}_DB SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}',
+      POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot',
+      POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';
+
+ALTER WAREHOUSE POT_${C_UPPER}_WH_S SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}', POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot', POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';
+ALTER WAREHOUSE POT_${C_UPPER}_WH_M SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}', POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot', POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';
+ALTER WAREHOUSE POT_${C_UPPER}_WH_L SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}', POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot', POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';
+
+ALTER ROLE POT_${C_UPPER}_ROLE SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}', POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot', POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';
+
+ALTER USER POT_${C_UPPER}_SVC SET
+  TAG POT_ADMIN.TAGS.POT_CLIENT = '${C_LOWER}', POT_ADMIN.TAGS.POT_LIFECYCLE = 'pot', POT_ADMIN.TAGS.POT_EXPIRY = '${EXPIRY}';

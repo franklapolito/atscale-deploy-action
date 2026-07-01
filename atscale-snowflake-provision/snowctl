@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+#
+# snowctl — Snowflake provisioning for AtScale PoT (operator console + Action body).
+#
+# Provisions, per PoT, a tightly-scoped Snowflake footprint: three warehouses
+# (S/M/L), a POT_<C>_DB with SOURCE (data-gen target + AtScale read) and
+# AGGREGATES (AtScale read/write) schemas, a scoped role, and a key-pair
+# TYPE=SERVICE principal — all tagged for cost tracking and teardownable by
+# prefix. Emits a ps-utils-ready connections.yaml fragment + private key.
+#
+# Runs locally (operator) and inside the composite GitHub Action (which sets
+# SNOWCTL_ASSUME_YES=1 so the confirm prompts are non-interactive).
+#
+# Mirrors the sibling atscale-deploy-action deploy.sh conventions. See CLAUDE.md
+# for the hard guardrails (se-demo is a REAL account — scoping + safe teardown).
+#
+# Subcommands:
+#   bootstrap            one-time: create shared POT_ADMIN.TAGS (run once per account)
+#   provision <client>   gen keypair -> render -> (confirm) run -> emit connections fragment
+#   teardown  <client>   render -> (confirm) DROP only POT_<C>_ objects
+#   list                 show active PoT warehouses + tag references
+#   render    <client>   dry-run: render SQL + fragment to runtime/, execute nothing
+#
+# All config is via environment variables (see CONFIG below).
+#
+set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# CONFIG (env-overridable)
+# ----------------------------------------------------------------------------
+# Snowflake CLI named admin connection (role must be able to CREATE ROLE/USER,
+# WAREHOUSE + DATABASE, and CREATE/APPLY TAG — see README prerequisites).
+SNOW_CONNECTION="${SNOW_CONNECTION:-se-demo-admin}"
+# se-demo account identifier — emitted verbatim into the ps-utils fragment.
+SNOW_ACCOUNT="${SNOW_ACCOUNT:-}"
+
+# Warehouse sizes (parameterizable) — SMALL / MEDIUM / LARGE.
+WH_S_SIZE="${WH_S_SIZE:-SMALL}"
+WH_M_SIZE="${WH_M_SIZE:-MEDIUM}"
+WH_L_SIZE="${WH_L_SIZE:-LARGE}"
+AUTO_SUSPEND="${AUTO_SUSPEND:-60}"        # seconds idle before a warehouse suspends
+
+# Cost-tracking expiry tag. POT_EXPIRY overrides; else now + POT_TTL_DAYS.
+POT_TTL_DAYS="${POT_TTL_DAYS:-7}"
+EXPIRY="${POT_EXPIRY:-$(date -u -d "+${POT_TTL_DAYS} days" +%F 2>/dev/null \
+        || date -u -v+"${POT_TTL_DAYS}"d +%F 2>/dev/null || echo "unset")}"
+
+# Key-pair: optional passphrase to encrypt the generated PKCS#8 private key.
+KEY_PASSPHRASE="${KEY_PASSPHRASE:-}"
+
+# Runtime (gitignored — holds the generated private key + rendered SQL).
+RUNTIME_DIR="${RUNTIME_DIR:-runtime}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+log()  { echo "[snowctl $(date -u +%H:%M:%S)] $*"; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+require_cmds() {
+  local missing=()
+  for c in "$@"; do have "$c" || missing+=("$c"); done
+  [ ${#missing[@]} -eq 0 ] || die "missing required commands: ${missing[*]}"
+}
+
+# Confirm-first on billable/destructive ops. Non-interactive when the Action
+# (or operator) sets SNOWCTL_ASSUME_YES=1 / passes --yes.
+confirm() {
+  if [ "${SNOWCTL_ASSUME_YES:-}" = "1" ]; then
+    log "auto-confirm (SNOWCTL_ASSUME_YES=1): $1"
+    return 0
+  fi
+  local reply
+  read -r -p "$1 [y/N] " reply
+  case "$reply" in
+    [yY] | [yY][eE][sS]) return 0 ;;
+    *) die "aborted by operator" ;;
+  esac
+}
+
+need_client() {
+  [ -n "${CLIENT_ID:-}" ] || die "client id required (usage: snowctl ${cmd:-<cmd>} <client>)"
+  [[ "$CLIENT_ID" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] \
+    || die "invalid client id '$CLIENT_ID' — must match ^[A-Za-z][A-Za-z0-9_]*\$ (Snowflake identifier: letter-first, letters/digits/underscore; no hyphens)"
+}
+
+# Export the substitution vars envsubst reads (client-name components + knobs).
+compute_vars() {
+  C_UPPER="$(printf '%s' "$CLIENT_ID" | tr '[:lower:]' '[:upper:]')"
+  C_LOWER="$(printf '%s' "$CLIENT_ID" | tr '[:upper:]' '[:lower:]')"
+  export C_UPPER C_LOWER WH_S_SIZE WH_M_SIZE WH_L_SIZE AUTO_SUSPEND EXPIRY
+}
+
+# Generate (or reuse) the service-principal key-pair. Idempotent: if the private
+# key already exists we reuse it (no rotation, so re-provision converges), and
+# always (re)derive the public-key body for the SQL from whatever key is present.
+gen_keypair() {
+  mkdir -p "$RUNTIME_DIR"
+  local key="${RUNTIME_DIR}/${C_LOWER}_snowflake_key.p8"
+  local pub="${RUNTIME_DIR}/${C_LOWER}_snowflake_key.pub"
+  local passin=() passout=()
+  [ -n "$KEY_PASSPHRASE" ] && { passin=(-passin "pass:${KEY_PASSPHRASE}"); passout=(-passout "pass:${KEY_PASSPHRASE}"); }
+
+  if [ -f "$key" ]; then
+    log "reusing existing private key $key (idempotent — no rotation)"
+  else
+    log "generating RSA 2048 key-pair (PKCS#8) for POT_${C_UPPER}_SVC"
+    if [ -n "$KEY_PASSPHRASE" ]; then
+      openssl genrsa 2048 2>/dev/null | openssl pkcs8 -topk8 -inform PEM -out "$key" "${passout[@]}"
+    else
+      openssl genrsa 2048 2>/dev/null | openssl pkcs8 -topk8 -inform PEM -nocrypt -out "$key"
+    fi
+    chmod 600 "$key"
+  fi
+
+  openssl rsa -in "$key" "${passin[@]}" -pubout -out "$pub" 2>/dev/null \
+    || die "could not derive public key from $key (wrong KEY_PASSPHRASE?)"
+  chmod 644 "$pub"
+
+  # RSA_PUBLIC_KEY wants the base64 body only — strip PEM header/footer + newlines.
+  PUBKEY="$(sed -e '/-----BEGIN PUBLIC KEY-----/d' -e '/-----END PUBLIC KEY-----/d' "$pub" | tr -d '\n')"
+  export PUBKEY
+  [ -n "$PUBKEY" ] || die "empty public key body — key generation failed"
+}
+
+# Render a .sql.tmpl against OUR variable allow-list only, so a stray '$' in SQL
+# is never touched. Prefers envsubst; falls back to sed where gettext is absent
+# (macOS without `brew install gettext`). The sed branch uses '|' as delimiter —
+# base64 public keys can contain '/', never '|'/'&'. chmod 600 (rendered provision
+# SQL embeds the public key; keep it beside the private key).
+render_sql() {
+  local tmpl="$1" out="$2"
+  mkdir -p "$RUNTIME_DIR"
+  if have envsubst; then
+    envsubst '${C_UPPER} ${C_LOWER} ${PUBKEY} ${WH_S_SIZE} ${WH_M_SIZE} ${WH_L_SIZE} ${AUTO_SUSPEND} ${EXPIRY}' \
+      < "$tmpl" > "$out"
+  else
+    sed \
+      -e "s|\${C_UPPER}|${C_UPPER}|g" \
+      -e "s|\${C_LOWER}|${C_LOWER}|g" \
+      -e "s|\${WH_S_SIZE}|${WH_S_SIZE}|g" \
+      -e "s|\${WH_M_SIZE}|${WH_M_SIZE}|g" \
+      -e "s|\${WH_L_SIZE}|${WH_L_SIZE}|g" \
+      -e "s|\${AUTO_SUSPEND}|${AUTO_SUSPEND}|g" \
+      -e "s|\${EXPIRY}|${EXPIRY}|g" \
+      -e "s|\${PUBKEY}|${PUBKEY:-}|g" \
+      "$tmpl" > "$out"
+  fi
+  chmod 600 "$out"
+  log "rendered $out"
+}
+
+run_sql() {
+  local file="$1"
+  require_cmds snow
+  log "executing $file via snow (connection: $SNOW_CONNECTION)"
+  snow sql -c "$SNOW_CONNECTION" -f "$file"
+}
+
+# ps-utils connections fragment (block YAML — mirrors deploy.sh echo style).
+emit_connections() {
+  local frag="${RUNTIME_DIR}/connections-${C_LOWER}.yaml"
+  local key="${RUNTIME_DIR}/${C_LOWER}_snowflake_key.p8"
+  local acct="${SNOW_ACCOUNT:-__SET_SNOW_ACCOUNT__}"
+  [ -n "$SNOW_ACCOUNT" ] || log "WARNING: SNOW_ACCOUNT unset — fragment 'account:' is a placeholder; set it before feeding ps-utils"
+  {
+    echo "# Generated by snowctl for PoT '${C_LOWER}'. ps-utils connections fragment."
+    echo "# DO NOT COMMIT — references the private key at ${key}."
+    echo "# AtScale aggregate schema (ps-utils --aggregate-schema): POT_${C_UPPER}_DB.AGGREGATES"
+    echo "users:"
+    echo "  pot_${C_LOWER}_svc:"
+    echo "    username: POT_${C_UPPER}_SVC"
+    echo "    privateKeyPath: ${key}"
+    echo "connections:"
+    echo "  ${C_LOWER}_snowflake:"
+    echo "    sql:"
+    echo "      dialect: snowflake"
+    echo "      account: ${acct}"
+    echo "      warehouse: POT_${C_UPPER}_WH_M"
+    echo "      database: POT_${C_UPPER}_DB"
+    echo "      schema: SOURCE"
+    echo "      role: POT_${C_UPPER}_ROLE"
+    echo "      snowflake_user: pot_${C_LOWER}_svc"
+  } > "$frag"
+  chmod 600 "$frag"
+  log "wrote $frag"
+}
+
+print_summary() {
+  echo "=============================================="
+  echo "PoT '${C_LOWER}' Snowflake footprint provisioned"
+  echo "  Database   : POT_${C_UPPER}_DB (schemas: SOURCE, AGGREGATES)"
+  echo "  Warehouses : POT_${C_UPPER}_WH_S/_M/_L (${WH_S_SIZE}/${WH_M_SIZE}/${WH_L_SIZE})"
+  echo "  Role       : POT_${C_UPPER}_ROLE (scoped to this PoT only)"
+  echo "  Service SP : POT_${C_UPPER}_SVC (TYPE=SERVICE, key-pair auth)"
+  echo "  Private key: ${RUNTIME_DIR}/${C_LOWER}_snowflake_key.p8"
+  echo "  ps-utils   : ${RUNTIME_DIR}/connections-${C_LOWER}.yaml"
+  echo "               (--aggregate-schema POT_${C_UPPER}_DB.AGGREGATES)"
+  echo "=============================================="
+}
+
+on_error() {
+  echo "----------------------------------------------------------------" >&2
+  echo "snowctl FAILED (cmd: ${cmd:-?}, client: ${CLIENT_ID:-n/a})." >&2
+  echo "No automatic teardown (guardrail: no unattended destructive ops)." >&2
+  echo "To inspect:  snow sql -c ${SNOW_CONNECTION} -q \"SHOW WAREHOUSES LIKE 'POT\\_%';\"" >&2
+  echo "To remove:   ./snowctl teardown ${CLIENT_ID:-<client>}   (run manually after review)" >&2
+  echo "----------------------------------------------------------------" >&2
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: snowctl <command> [client] [--yes]
+
+  bootstrap            one-time: create shared POT_ADMIN.TAGS (run once per account)
+  provision <client>   gen keypair -> render -> (confirm) run -> emit ps-utils fragment
+  teardown  <client>   render -> (confirm) DROP only POT_<C>_ objects
+  list                 show active PoT warehouses + tag references
+  render    <client>   dry-run: render SQL + fragment to runtime/, execute nothing
+
+  --yes                skip confirm prompts (same as SNOWCTL_ASSUME_YES=1)
+EOF
+  exit 1
+}
+
+# ----------------------------------------------------------------------------
+# Arg parsing: pull out --yes/-y, leave positional [command] [client]
+# ----------------------------------------------------------------------------
+POSN=()
+for a in "$@"; do
+  case "$a" in
+    --yes | -y) export SNOWCTL_ASSUME_YES=1 ;;
+    -h | --help) usage ;;
+    *) POSN+=("$a") ;;
+  esac
+done
+cmd="${POSN[0]:-}"
+CLIENT_ID="${POSN[1]:-${CLIENT_ID:-}}"
+
+# ----------------------------------------------------------------------------
+# Entry
+# ----------------------------------------------------------------------------
+case "$cmd" in
+  bootstrap)
+    trap on_error ERR
+    require_cmds snow
+    confirm "Bootstrap POT_ADMIN.TAGS on connection '$SNOW_CONNECTION' (creates a shared admin DB + cost tags)?"
+    run_sql "${SCRIPT_DIR}/sql/tags.sql"
+    log "bootstrap complete — POT_ADMIN.TAGS ready"
+    ;;
+
+  provision)
+    trap on_error ERR
+    need_client
+    compute_vars
+    require_cmds snow openssl sed
+    gen_keypair
+    out="${RUNTIME_DIR}/provision-${C_LOWER}.sql"
+    render_sql "${SCRIPT_DIR}/sql/provision.sql.tmpl" "$out"
+    confirm "Provision live Snowflake footprint POT_${C_UPPER}_* on '$SNOW_CONNECTION' (BILLABLE, real se-demo account)?"
+    run_sql "$out"
+    emit_connections
+    print_summary
+    ;;
+
+  teardown)
+    trap on_error ERR
+    need_client
+    compute_vars
+    require_cmds snow sed
+    out="${RUNTIME_DIR}/teardown-${C_LOWER}.sql"
+    render_sql "${SCRIPT_DIR}/sql/teardown.sql.tmpl" "$out"
+    echo "WILL DROP (and only) these objects:"
+    echo "  USER      POT_${C_UPPER}_SVC"
+    echo "  WAREHOUSE POT_${C_UPPER}_WH_S / _WH_M / _WH_L"
+    echo "  DATABASE  POT_${C_UPPER}_DB   (cascades schemas + tables)"
+    echo "  ROLE      POT_${C_UPPER}_ROLE"
+    confirm "Permanently DROP the POT_${C_UPPER}_ footprint on '$SNOW_CONNECTION'? DESTRUCTIVE."
+    run_sql "$out"
+    log "teardown complete — POT_${C_UPPER}_ objects removed; POT_ADMIN + other PoTs untouched"
+    ;;
+
+  list)
+    require_cmds snow
+    log "active PoT warehouses (POT_%):"
+    snow sql -c "$SNOW_CONNECTION" -q "SHOW WAREHOUSES LIKE 'POT\\_%';"
+    log "PoT tag references (from POT_ADMIN — ACCOUNT_USAGE, may lag):"
+    snow sql -c "$SNOW_CONNECTION" -q \
+      "SELECT TAG_NAME, TAG_VALUE, OBJECT_NAME, DOMAIN FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES WHERE TAG_DATABASE = 'POT_ADMIN' ORDER BY TAG_VALUE, DOMAIN;" \
+      || log "(tag lookup skipped — ACCOUNT_USAGE latency/permission)"
+    ;;
+
+  render)
+    need_client
+    compute_vars
+    require_cmds openssl sed
+    gen_keypair   # needed so the rendered provision SQL carries a real public key
+    render_sql "${SCRIPT_DIR}/sql/provision.sql.tmpl" "${RUNTIME_DIR}/provision-${C_LOWER}.sql"
+    render_sql "${SCRIPT_DIR}/sql/teardown.sql.tmpl"   "${RUNTIME_DIR}/teardown-${C_LOWER}.sql"
+    emit_connections
+    log "dry-run: rendered SQL + connections fragment to ${RUNTIME_DIR}/ (nothing executed)"
+    ;;
+
+  "" ) usage ;;
+  * ) die "unknown command '$cmd' (use: bootstrap | provision | teardown | list | render)" ;;
+esac

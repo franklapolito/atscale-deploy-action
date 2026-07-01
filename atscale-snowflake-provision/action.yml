@@ -1,0 +1,84 @@
+name: 'Provision AtScale PoT Snowflake'
+description: 'Provisions a per-PoT Snowflake footprint (S/M/L warehouses, scoped role, key-pair TYPE=SERVICE principal, cost tags) and emits a ps-utils connections fragment.'
+
+inputs:
+  client_id:              { description: 'Client / prospect id (e.g. aig) — drives POT_<C>_ object names', required: true }
+  snow_account:           { description: 'Snowflake account identifier (se-demo) — emitted into the ps-utils fragment', required: true }
+  snow_connection:        { description: 'Named connection snowctl passes to `snow -c`', required: false, default: 'se-demo-admin' }
+  snow_admin_user:        { description: 'Admin user for the named connection', required: true }
+  snow_admin_role:        { description: 'Admin role (needs CREATE ROLE/USER/WAREHOUSE/DATABASE + CREATE/APPLY TAG)', required: false, default: 'ACCOUNTADMIN' }
+  snow_admin_private_key: { description: 'Admin key-pair private key PEM (PKCS#8) — a GitHub secret', required: true }
+  wh_s_size:              { description: 'Small warehouse size', required: false, default: 'SMALL' }
+  wh_m_size:              { description: 'Medium warehouse size', required: false, default: 'MEDIUM' }
+  wh_l_size:              { description: 'Large warehouse size', required: false, default: 'LARGE' }
+  auto_suspend:           { description: 'Warehouse auto-suspend seconds', required: false, default: '60' }
+  pot_ttl_days:           { description: 'Days until the pot_expiry tag date', required: false, default: '7' }
+
+outputs:
+  connections_fragment:
+    description: 'Path to the rendered ps-utils connections fragment (consume in a later step in the same job)'
+    value: ${{ steps.provision.outputs.connections_fragment }}
+  private_key:
+    description: 'Path to the generated service-principal private key (same-job handoff only — never upload as an artifact)'
+    value: ${{ steps.provision.outputs.private_key }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Snowflake CLI
+      shell: bash
+      run: python3 -m pip install --quiet --upgrade snowflake-cli
+
+    - name: Configure admin connection
+      shell: bash
+      env:
+        SNOW_CONNECTION:        ${{ inputs.snow_connection }}
+        SNOW_ACCOUNT:           ${{ inputs.snow_account }}
+        SNOW_ADMIN_USER:        ${{ inputs.snow_admin_user }}
+        SNOW_ADMIN_ROLE:        ${{ inputs.snow_admin_role }}
+        SNOW_ADMIN_PRIVATE_KEY: ${{ inputs.snow_admin_private_key }}
+      run: |
+        set -euo pipefail
+        umask 077
+        cfg_dir="${HOME}/.snowflake"
+        mkdir -p "$cfg_dir"
+        key_file="${cfg_dir}/admin_key.p8"
+        printf '%s\n' "$SNOW_ADMIN_PRIVATE_KEY" > "$key_file"
+        chmod 600 "$key_file"
+        # Snowflake CLI named connection (key-pair / JWT). Field name is
+        # version-sensitive — adjust private_key_file if your CLI wants
+        # private_key_path.
+        {
+          echo "[connections.${SNOW_CONNECTION}]"
+          echo "account = \"${SNOW_ACCOUNT}\""
+          echo "user = \"${SNOW_ADMIN_USER}\""
+          echo "role = \"${SNOW_ADMIN_ROLE}\""
+          echo "authenticator = \"SNOWFLAKE_JWT\""
+          echo "private_key_file = \"${key_file}\""
+        } > "${cfg_dir}/connections.toml"
+        chmod 600 "${cfg_dir}/connections.toml"
+
+    - name: Provision Snowflake footprint
+      id: provision
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        CLIENT_ID:          ${{ inputs.client_id }}
+        SNOW_CONNECTION:    ${{ inputs.snow_connection }}
+        SNOW_ACCOUNT:       ${{ inputs.snow_account }}
+        WH_S_SIZE:          ${{ inputs.wh_s_size }}
+        WH_M_SIZE:          ${{ inputs.wh_m_size }}
+        WH_L_SIZE:          ${{ inputs.wh_l_size }}
+        AUTO_SUSPEND:       ${{ inputs.auto_suspend }}
+        POT_TTL_DAYS:       ${{ inputs.pot_ttl_days }}
+        SNOWCTL_ASSUME_YES: '1'
+      run: |
+        set -euo pipefail
+        chmod +x ./snowctl
+        ./snowctl bootstrap                    # idempotent: ensure POT_ADMIN.TAGS
+        ./snowctl provision "${CLIENT_ID}"
+        c_lower="$(printf '%s' "${CLIENT_ID}" | tr '[:upper:]' '[:lower:]')"
+        {
+          echo "connections_fragment=${{ github.action_path }}/runtime/connections-${c_lower}.yaml"
+          echo "private_key=${{ github.action_path }}/runtime/${c_lower}_snowflake_key.p8"
+        } >> "$GITHUB_OUTPUT"

@@ -1,0 +1,19 @@
+-- teardown.sql.tmpl — surgical removal of ONE PoT footprint.
+--
+-- Rendered with envsubst against a single variable:
+--   ${C_UPPER}   uppercase client id -> POT_<C>_ object-name component
+--
+-- DROPs ONLY objects named POT_${C_UPPER}_*. It never references POT_ADMIN,
+-- other PoTs, or any pre-existing se-demo object. DROP DATABASE cascades its
+-- schemas + tables. Order: user (has default role/wh) -> warehouses ->
+-- database -> role, each IF EXISTS so a partial teardown re-runs cleanly.
+
+DROP USER IF EXISTS POT_${C_UPPER}_SVC;
+
+DROP WAREHOUSE IF EXISTS POT_${C_UPPER}_WH_S;
+DROP WAREHOUSE IF EXISTS POT_${C_UPPER}_WH_M;
+DROP WAREHOUSE IF EXISTS POT_${C_UPPER}_WH_L;
+
+DROP DATABASE IF EXISTS POT_${C_UPPER}_DB;
+
+DROP ROLE IF EXISTS POT_${C_UPPER}_ROLE;

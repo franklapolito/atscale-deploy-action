@@ -1,0 +1,25 @@
+# --- Secrets / credentials — NEVER commit ---
+# Generated key-pair private keys for PoT service principals.
+*.p8
+*.pem
+*.key
+*.pub
+*.p12
+*.pfx
+.env
+.env.*
+snow-creds*.json
+
+# --- Runtime / generated artifacts ---
+# snowctl writes rendered SQL, the generated keypair, and the ps-utils
+# connections fragment here. The private key material lives in this dir.
+runtime/
+generated/
+*.generated.sql
+tmp/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
