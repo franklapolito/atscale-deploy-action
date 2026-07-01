@@ -3,7 +3,7 @@ description: 'Provisions one self-contained Azure VM (MicroK8s + Helm) and deplo
 
 inputs:
   client_id:             { description: 'Client / prospect name (e.g. acme) — drives naming + <client>.atscalehosted.com', required: true }
-  region:                { description: 'Azure region', required: false, default: 'eastus' }
+  region:                { description: 'Azure region (needs >=8 free ESv3 + regional cores on se-demo)', required: false, default: 'westus3' }
   vm_size:               { description: 'VM size (D1: proven default E8s_v3; bump to D16s_v5 for more concurrency)', required: false, default: 'Standard_E8s_v3' }
   chart_version:         { description: 'AtScale chart version (floor C2026.5.1+)', required: false, default: '2026.5.1' }
   base_domain:           { description: 'Apex domain for the wildcard cert', required: false, default: 'atscalehosted.com' }
@@ -55,6 +55,12 @@ runs:
         client-id: ${{ inputs.azure_client_id }}
         tenant-id: ${{ inputs.azure_tenant_id }}
         subscription-id: ${{ inputs.azure_subscription_id }}
+
+    - name: Mask AtScale admin password
+      shell: bash
+      env:
+        PW: ${{ inputs.atscale_admin_password }}
+      run: '[ -n "$PW" ] && echo "::add-mask::$PW" || true'
 
     - name: Provision + deploy
       id: deploy

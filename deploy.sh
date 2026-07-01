@@ -23,7 +23,7 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 CLIENT_ID="${CLIENT_ID:?CLIENT_ID is required (e.g. acme)}"
 
-REGION="${REGION:-eastus}"
+REGION="${REGION:-westus3}"   # se-demo has ~10 cores/region; eastus has no free ESv3 quota — see plan §8
 VM_SIZE="${VM_SIZE:-Standard_E8s_v3}"          # D1: proven default; bump to Standard_D16s_v5 for more concurrency
 CHART_VERSION="${CHART_VERSION:-2026.5.1}"     # D2: floor C2026.5.1+
 IMAGE="${IMAGE:-Ubuntu2404}"
@@ -69,6 +69,9 @@ DB_SIZE="${DB_SIZE:-64Gi}"
 # determinism across re-runs.
 ATSCALE_ADMIN_USER="${ATSCALE_ADMIN_USER:-atscale-kc-admin}"
 ATSCALE_ADMIN_PASSWORD="${ATSCALE_ADMIN_PASSWORD:-$(openssl rand -hex 16 2>/dev/null || echo "AtScalePoT${RANDOM}${RANDOM}")}"
+# Mask the admin password for the ENTIRE run (CI), not just at output time — so a
+# failure before emit_github_outputs can never leave it unmasked in the logs.
+[ -n "${GITHUB_ACTIONS:-}" ] && echo "::add-mask::${ATSCALE_ADMIN_PASSWORD}" || true
 
 # DNS (Cloudflare — §3.6). If a token+zone are present we could call the API;
 # for v1 the stub just prints the record the operator adds manually.
