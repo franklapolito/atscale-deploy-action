@@ -36,8 +36,8 @@ install_snap() {
   fi
 }
 install_snap microk8s
-install_snap helm
-install_snap kubectl
+# helm3 + kubectl ship inside the microk8s snap (used as `microk8s helm3` /
+# `microk8s kubectl` throughout) — no standalone snaps needed.
 
 # Let the invoking user drive microk8s without sudo on re-runs.
 sudo usermod -a -G microk8s "$(whoami)" 2>/dev/null || true
@@ -94,6 +94,10 @@ fi
 # --- 7. Credentials --------------------------------------------------------
 AS_USER="$(sudo microk8s kubectl get secret -n "$NAMESPACE" atscale-kc-users -o jsonpath='{.data.atscaleAdmin}' | base64 -d || true)"
 AS_PASS="$(sudo microk8s kubectl get secret -n "$NAMESPACE" atscale-kc-users -o jsonpath='{.data.atscaleAdminPassword}' | base64 -d || true)"
+# This stdout streams back through the composite Action into the workflow log.
+# GitHub only masks values registered with ::add-mask::, so register the
+# password before printing to keep it out of the plaintext CI log.
+[ -n "${AS_PASS:-}" ] && [ -n "${GITHUB_ACTIONS:-}" ] && echo "::add-mask::${AS_PASS}"
 echo "=============================================="
 echo "AtScale admin user : ${AS_USER:-<unavailable>}"
 echo "AtScale admin pass : ${AS_PASS:-<unavailable>}"
