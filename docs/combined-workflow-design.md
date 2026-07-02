@@ -152,19 +152,25 @@ job: wire   (needs: provision)
 2. **AtScale creds:** ✅ **inject deterministic admin creds** at deploy time (§3.3); prefer an API token if the chart can seed one, else username/password for the Keycloak cookie flow.
 6. **Home:** ✅ **new dedicated repo** (e.g. `atscale-pot-bundle`) — the orchestrator consumes both Actions via `uses:`.
 
-**Still open:**
-3. **ps-utils op ordering:** data-first or model-first (§5 note)? Leaning data-first since SML generation samples live data (`--sample-size` 250).
-4. **AtScale git repo** for deploy-catalog: seed per-PoT or fixed convention (§3.5)?
-5. **data-shape fingerprint** source: which reference dataset, carried how (bundle artifact vs input)?
-6. **Region/quota selection (NEW — validated 2026-07-01):** se-demo has tight per-region core quotas (~10 cores/region). An `E8s_v3` (8 cores) needs ≥8 free in BOTH *Total Regional Cores* and *standardESv3Family*. On 2026-07-01 only `westus3`/`westus`/`southcentralus`/`northcentralus` qualified; `eastus`/`eastus2`/`westus2`/`centralus` did not. The workflow can't default `region` blindly — either pin a known-good region or add a preflight that picks one with quota (`az vm list-usage`). A live local `deploy.sh create` (client `citest3`, westus3) succeeded end-to-end and emitted all 5 outputs correctly, so the deploy-action output contract is proven; only the CI/OIDC path is still unproven.
+**Resolved during the wire build (2026-07-01):**
+3. **ps-utils op ordering:** ✅ **data-first** (generate-data → generate-sml → create-data-source → deploy-catalog) — SML samples live data.
+4. **AtScale git repo** for deploy-catalog: ✅ **throwaway private GitHub repo per PoT** (`atscale-pot-sml-<client>`), tokenized pull URL, deleted on teardown.
+5. **data-shape fingerprint:** ✅ **committed sample** for now (`data-shapes/`), input-driven later.
+6. **Region/quota:** ✅ pinned default → `westus3` (deploy.sh + smoke test); a proper `az vm list-usage` pre-flight is a deferred follow-up. Context: se-demo caps ~10 cores/region; `E8s_v3` needs ≥8 free in BOTH *Total Regional Cores* AND *standardESv3Family* (only westus3/westus/southcentral/northcentral qualified on 2026-07-01).
 
-## 7. Recommended build sequence (once design is agreed)
+**Still open — the big one:**
+7. **Use-case → model engine (NEW, from the Demo-on-Demand one-pager):** the use-case→data+model path exists **twice** — (a) **ps-utils in-CI** (`generate-data` + `generate-sml`, already wired in `pot-bundle.yml`), and (b) **two Field Engineering Claude skills** — *Use-Case Bundle Generator* (company URL → loadable dataset bundle) + *AtScale SML Model Generator* (bundle → validated SML repo). Options: **A** ps-utils only (self-contained, wired today) · **B** FE skills (richer URL→bundle→SML, but hosted/less headless-friendly) · **C** both (skills produce the bundle/SML, ps-utils loads+deploys — likely the real answer). *Action: locate + read the two FE skills (Confluence / FE skills repo) before committing.*
 
-1. Add the `deploy-action` output contract (§4) — small, unblocks everything.
-2. Prove each Action standalone in CI (`workflow_dispatch` smoke tests): snowflake
-   Stage 5, then deploy-action's first CI run.
-3. Build the `wire` job (assembly + hosts + health-check) against the two proven Actions.
-4. Layer in ps-utils ops one at a time (create-data-source first — it's the
-   prerequisite for deploy-catalog).
-5. End-to-end dry run against a throwaway `client_id`, then tear down.
+## 7. Build sequence — status (2026-07-01)
+
+1. ✅ `deploy-action` output contract (§4).
+2. ✅ Both Actions CI-proven standalone (snowflake Stage 5; deploy-action OIDC path).
+3. ✅ `wire` job built + reviewed (assembly + hosts + health-check + ps-utils tail + teardown).
+4. ✅ Blockers + billing-safety review fixes merged.
+5. ⬜ **NEXT — seam-test live run (do first):** trimmed dispatch (`seam_test_only=true`)
+   through `create-data-source`, no data-shape/GH_PAT needed — proves the never-run
+   live integration (OIDC deploy → SF → hosts → health-check → assemble → ps-utils
+   authenticates to live AtScale + registers the data source → teardown).
+6. ⬜ First FULL run (data-shape sample + `GH_PAT`), then use-case selection (§7 open
+   decision), BI + MCP-agent steps, Slack trigger, scale guardrails.
 ```
