@@ -5,7 +5,7 @@ inputs:
   client_id:             { description: 'Client / prospect name (e.g. acme) — drives naming + <client>.atscalehosted.com', required: true }
   region:                { description: 'Azure region (needs >=8 free ESv3 + regional cores on se-demo)', required: false, default: 'westus3' }
   vm_size:               { description: 'VM size (D1: proven default E8s_v3; bump to D16s_v5 for more concurrency)', required: false, default: 'Standard_E8s_v3' }
-  chart_version:         { description: 'AtScale chart version (floor C2026.5.1+)', required: false, default: '2026.5.1' }
+  chart_version:         { description: 'AtScale chart version (floor C2026.5.1+)', required: false, default: '2026.7.1' }
   base_domain:           { description: 'Apex domain for the wildcard cert', required: false, default: 'atscalehosted.com' }
   open_thrift:           { description: 'Open port 11111 (Thrift) — only if a BI tool needs it', required: false, default: 'false' }
   keyvault:              { description: 'Key Vault holding the wildcard key (and cert, if not passed inline)', required: false, default: 'se-demo-keyvault' }
