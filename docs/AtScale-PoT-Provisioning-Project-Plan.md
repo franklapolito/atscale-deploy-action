@@ -1,6 +1,6 @@
 # AtScale Proof-of-Technology (PoT) Environment Provisioning — Project Plan
 
-**Owner:** Frank · **Status:** v1.1 (§3.6 CLOSED; **Phase 1 VALIDATED by first live PoT** — `aig` @ westus2, chart 2026.5.0, ~8.5 min, serving the wildcard cert) · **Last updated:** 2026-06-30
+**Owner:** Frank · **Status:** v1.2 (default chart bumped to **2026.7.1** — matches demo2/swtdev; prevents `deploy.sh create` downgrading upgraded boxes. Prior: §3.6 CLOSED; Phase 1 validated by live PoT `aig` @ westus2) · **Last updated:** 2026-08-26
 
 > Living document. v1.0 closes §3.6 (the last blocker): the `*.atscalehosted.com` wildcard private key is confirmed in **`se-demo-keyvault`** (secret `atscalehosted-com-cert-private-key`, base64 PEM), and `atscalehosted.com` DNS is hosted in **Cloudflare** — option A is adopted, with a **manual A record per PoT for v1** (Cloudflare-API automation deferred to Phase 2). Architecture fully pinned; recon complete; Phase 1 build (refactored `action.yml` + shared `deploy.sh`) is underway. **Target version floor: C2026.5.1+** (demo runs 2026.5.0).
 
@@ -37,7 +37,7 @@ Superseded for sizing by current docs (§3.5). Historical value: MicroK8s + Meta
 | # | Issue | Decision / Resolution (2026-06-30) |
 |---|---|---|
 | **D1** | VM undersized | **RESOLVED to field reality.** Both golden envs run **`Standard_E8s_v3` (8 vCPU / 64 GB, memory-optimized)** and are flagged *underutilized* by Azure Advisor — so **8 cores / 64 GB is proven sufficient** for demo/light-PoT load. AtScale's doc "POC" tier is `D16s_v5` (16 vCPU / 64 GB) — more concurrency headroom but 2× the cores. **Recommended PoT default: `Standard_E8s_v3`** (matches proven config, half the vCPU = friendlier to quota); **parameterize** so we can bump to `D16s_v5` for a higher-concurrency PoT. (Modern equiv `E8s_v5/v6` worth a look later.) Old `DC2ds_v3` (2/16) was a dev-quota workaround. Premium SSD (PG needs ~5000+ IOPS); x86_64. |
-| **D2** | Chart version drift | **Floor: C2026.5.1+** (current latest). Parameterize via tag/variable; default to latest in the C2026.5.x line. Check for an LTS designation and borrow `qa-perf`'s version-pin method. |
+| **D2** | Chart version drift | **Floor: C2026.5.1+**; parameterized (`chart_version` input / `CHART_VERSION` env). **Default: 2026.7.1** (2026-08-26 — the version demo2 and swtdev run; an older default caused an accidental 7.1→5.1 downgrade when `create` was re-run on an upgraded box). Bump the default when live boxes move. |
 | **D3** | Ingress conflict | **RESOLVED — see §3.3.** Remove the microk8s nginx addon + custom Ingress; expose the chart's own proxy via MetalLB; wildcard cert via `existingSecret`. |
 
 ### 3.2 PoT gaps

@@ -13,7 +13,7 @@ Automated provisioning for AtScale **Proof-of-Technology (PoT)** environments on
 
 ## Hard guardrails — do NOT violate
 - **Ingress:** enable MicroK8s addons **`dns hostpath-storage` + `metallb:<nodeIP>/32` ONLY. Never enable the `ingress` addon. No custom `Ingress` resource.** The chart's **`atscale-ingress-gateway`** LoadBalancer is the single front door (ports 80/443/11111/15432). Delete the old nginx-addon + service-detection logic.
-- **Version:** chart floor **C2026.5.1+**, parameterized (demo runs 2026.5.0 — confirm values parity at 2026.5.1 before locking).
+- **Version:** chart floor **C2026.5.1+**, parameterized; **default 2026.7.1** (matches the live demo2/swtdev boxes — values structure confirmed working there). Re-running `deploy.sh create` against an existing box helm-upgrades to `CHART_VERSION`, so keep the default at/above what live boxes run to avoid accidental downgrades.
 - **VM:** default **`Standard_E8s_v3`** (8 vCPU/64 GB), Premium SSD, x86_64 — parameterized (region too).
 - **Cert:** wildcard **`*.atscalehosted.com`** from Azure Key Vault, injected inline as `global.atscale.tls.tlsCrt`/`tlsKey`. **Never commit certs/keys/credentials to the repo.**
 - **Values baseline (plan §3.7):** `atscale-mcp.enabled: true`, `atscale-proxy.service.type: LoadBalancer` (+ `replicaCount: 1`), `global.resourcePreset: none`, `atscale-engine.resources.requests {cpu: 500m, memory: 8Gi}`, `db.persistence.size: 64Gi`, `global.ingressDomain: <customer>.atscalehosted.com`.

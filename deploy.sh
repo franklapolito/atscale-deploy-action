@@ -25,7 +25,7 @@ CLIENT_ID="${CLIENT_ID:?CLIENT_ID is required (e.g. acme)}"
 
 REGION="${REGION:-westus3}"   # se-demo has ~10 cores/region; eastus has no free ESv3 quota — see plan §8
 VM_SIZE="${VM_SIZE:-Standard_E8s_v3}"          # D1: proven default; bump to Standard_D16s_v5 for more concurrency
-CHART_VERSION="${CHART_VERSION:-2026.5.1}"     # D2: floor C2026.5.1+
+CHART_VERSION="${CHART_VERSION:-2026.7.1}"     # D2: floor C2026.5.1+; default tracks live boxes (demo2/swtdev run 2026.7.1)
 IMAGE="${IMAGE:-Ubuntu2404}"
 OS_DISK_SIZE_GB="${OS_DISK_SIZE_GB:-256}"      # holds images + 64Gi embedded PG
 DISK_SKU="${DISK_SKU:-Premium_LRS}"            # PG needs ~5000+ IOPS
